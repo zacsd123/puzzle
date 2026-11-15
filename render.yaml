@@ -10,4 +10,4 @@ services:
       - key: NODE_ENV
         value: production
       - key: ALLOWED_ORIGIN
-        value: "*" # Vercel 프론트 주소 생기면 https://your-app.vercel.app 로 바꾸기
+        value: "https://puzzle-alpha-peach.vercel.app/" # Vercel 프론트 주소 생기면 https://your-app.vercel.app 로 바꾸기
