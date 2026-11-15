@@ -56,6 +56,25 @@ npm start
 
 > 방은 서버 메모리에만 저장됩니다. 서버를 재시작하면 방과 진행 상황이 사라지고, 아무도 없는 방은 6시간 뒤 자동 삭제됩니다.
 
+## 프론트/백엔드 분리 배포 (집 컴퓨터 안 켜놔도 되는 방식)
+
+프론트는 Vercel 같은 정적 호스팅에, 백엔드는 Render 같은 Node 호스팅에 따로 올리는 방법입니다. 계속 켜둘 집 컴퓨터가 필요 없고, 안정적인 고정 주소가 생깁니다.
+
+**백엔드 (Render)**
+
+1. 이 저장소를 GitHub에 올리고, Render에서 "New > Blueprint"로 연결하면 저장소에 있는 [render.yaml](render.yaml)을 읽어 자동으로 설정됩니다.
+2. 배포되면 `https://puzzle-party-server.onrender.com` 같은 주소가 생깁니다. 이게 백엔드 주소입니다.
+3. Render 대시보드 환경변수에서 `ALLOWED_ORIGIN`을 프론트 주소(예: `https://your-app.vercel.app`)로 바꿔주면 그 도메인만 API를 호출할 수 있습니다. (안 바꾸면 전체 허용 `*`로 동작, 테스트용으로는 괜찮음)
+4. 무료 플랜은 트래픽 없으면 잠들었다가 첫 요청에 깨어나서 몇십 초 걸릴 수 있습니다.
+
+**프론트 (Vercel)**
+
+1. Vercel에서 같은 저장소를 Import, 빌드 커맨드는 기본값(`npm run build` → `dist/`) 그대로 두면 됩니다.
+2. Vercel 프로젝트 환경변수에 `VITE_API_URL`을 백엔드 주소로 설정합니다 (예: `https://puzzle-party-server.onrender.com`). 이 값이 있으면 프론트가 API/이미지/WebSocket을 전부 이 주소로 호출합니다. 자세한 값은 [.env.example](.env.example) 참고.
+3. 배포 후 Render 쪽 `ALLOWED_ORIGIN`을 이 Vercel 주소로 맞춰줍니다.
+
+`VITE_API_URL`을 비워두면 지금까지처럼 프론트와 백엔드가 같은 origin이라고 가정하고 동작합니다 (한 서버로 `npm start` 하는 기존 방식).
+
 ## 제한
 
 - 사진은 업로드 전에 브라우저에서 긴 변 1600px 이하 JPEG로 줄여서 올립니다 (서버 최대 8MB).

@@ -2,6 +2,7 @@ import { useState } from 'react'
 import type { FormEvent } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
 import { MAX_NAME_LENGTH, ROOM_CODE_LENGTH } from '../../shared/protocol'
+import { apiUrl } from '../lib/config'
 import { loadName, saveName } from '../lib/storage'
 
 /** "ABCDE" 뿐 아니라 공유받은 링크 전체를 붙여넣어도 코드를 뽑아낸다. */
@@ -28,7 +29,7 @@ export default function Join() {
     setBusy(true)
     setError('')
     try {
-      const res = await fetch(`/api/rooms/${roomId}`)
+      const res = await fetch(apiUrl(`/api/rooms/${roomId}`))
       if (res.status === 404) throw new Error('그 코드의 방을 찾을 수 없어요.')
       if (!res.ok) throw new Error('방 정보를 불러오지 못했어요.')
       saveName(trimmed)
