@@ -29,12 +29,14 @@ export default function RestartDialog({ roomId, onClose }: { roomId: string; onC
   return (
     <div className="overlay">
       <form className="card modal wide" onSubmit={onSubmit}>
-        <h2>새 사진으로 다시 하기</h2>
-        <p className="muted">지금 방에 있는 사람들과 새 퍼즐을 시작해요. 연결 횟수는 0부터 다시 세요.</p>
+        <div className="modal-body">
+          <h2>새 사진으로 다시 하기</h2>
+          <p className="muted">지금 방에 있는 사람들과 새 퍼즐을 시작해요. 연결 횟수는 0부터 다시 세요.</p>
 
-        <PuzzleSetupFields setup={setup} onError={setError} />
+          <PuzzleSetupFields setup={setup} onError={setError} />
 
-        {error && <p className="error-text">{error}</p>}
+          {error && <p className="error-text">{error}</p>}
+        </div>
 
         <div className="modal-actions">
           <button type="button" className="btn" onClick={onClose} disabled={busy}>

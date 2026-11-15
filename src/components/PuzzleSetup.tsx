@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import type { CSSProperties, DragEvent } from 'react'
 import { MAX_PIECES, computeGrid } from '../../shared/protocol'
 import { maxSideFor, readImageSize, scaledSize } from '../lib/image'
+import { COARSE_QUERY, useMediaQuery } from '../lib/useMediaQuery'
 
 /**
  * 슬라이더가 고를 수 있는 조각 수. 애매한 숫자가 나오지 않도록 정해 둔 값만 쓴다.
@@ -84,6 +85,7 @@ export function PuzzleSetupFields({
   onError: (message: string) => void
 }) {
   const { picked, stop, setStop, count, plan, pickFile } = setup
+  const coarse = useMediaQuery(COARSE_QUERY) // 손가락이 주 입력(휴대폰/태블릿)이면 끌어다 놓기 대신 탭 안내
   const [dragOver, setDragOver] = useState(false)
   const fileInput = useRef<HTMLInputElement>(null)
 
@@ -124,8 +126,8 @@ export function PuzzleSetupFields({
             <img src={picked.url} alt="선택한 사진 미리보기" />
           ) : (
             <div className="dropzone-hint">
-              <strong>사진을 끌어다 놓거나 클릭해서 선택</strong>
-              <small>JPG · PNG · WEBP</small>
+              <strong>{coarse ? '탭해서 사진 고르기' : '사진을 끌어다 놓거나 클릭해서 선택'}</strong>
+              <small>{coarse ? '앨범에서 고르거나 카메라로 찍어요' : 'JPG · PNG · WEBP'}</small>
             </div>
           )}
           <input
@@ -178,6 +180,9 @@ export function PuzzleSetupFields({
             사진 해상도에 비해 조각이 너무 많아서 한 조각이 약 {plan.piecePx}px로 아주 작아요. 더 큰 사진을 쓰거나
             조각 수를 줄이는 걸 추천해요.
           </small>
+        )}
+        {coarse && count > 300 && count < 500 && (
+          <small className="muted">휴대폰·태블릿에서는 조각이 많으면 느려질 수 있어요. 300조각 이하를 추천해요.</small>
         )}
         {count >= 500 && (
           <small className="muted">조각이 많아서 처음 불러올 때 시간이 걸리고, 사양이 낮은 기기에서는 느릴 수 있어요.</small>

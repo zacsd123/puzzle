@@ -425,6 +425,9 @@ export class Room {
       case 'chat':
         this.broadcast({ t: 'chat', id: player.info.id, text: sanitizeChat(m.text) }, player.info.id)
         break
+      case 'ping':
+        send(player.ws, { t: 'pong' })
+        break
       case 'grab':
         if (isNum(m.piece)) this.grab(player, m.piece)
         break

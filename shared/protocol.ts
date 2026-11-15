@@ -93,6 +93,8 @@ export type ClientMessage =
   | { t: 'cursor'; x: number; y: number }
   /** 커서 옆에 띄울 글. 입력 중인 글 전체를 보내고, 빈 문자열이면 지운다. */
   | { t: 'chat'; text: string }
+  /** 연결이 살아 있는지 확인한다. (휴대폰이 백그라운드에서 돌아왔을 때 등) 서버는 'pong'으로 답한다. */
+  | { t: 'ping' }
   | { t: 'grab'; piece: number }
   | { t: 'move'; piece: number; x: number; y: number }
   | { t: 'drop'; piece: number; x: number; y: number }
@@ -112,6 +114,7 @@ export type ServerMessage =
     }
   /** 방장이 바뀌었다. (방장이 나가거나 다시 들어온 경우) */
   | { t: 'host'; id: string | null }
+  | { t: 'pong' }
   | { t: 'player_join'; player: PlayerInfo }
   | { t: 'player_leave'; id: string }
   | { t: 'cursor'; id: string; x: number; y: number }

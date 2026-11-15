@@ -1,0 +1,17 @@
+{
+  "name": "퍼즐 파티",
+  "short_name": "퍼즐 파티",
+  "description": "사진 한 장으로 친구들과 실시간으로 함께 맞추는 직소 퍼즐",
+  "lang": "ko",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "orientation": "any",
+  "background_color": "#0d1018",
+  "theme_color": "#0d1018",
+  "icons": [
+    { "src": "/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },
+    { "src": "/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any" },
+    { "src": "/icon-maskable-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+  ]
+}

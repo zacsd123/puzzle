@@ -1,10 +1,18 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
-import type { CSSProperties } from 'react'
+import { useCallback, useEffect, useImperativeHandle, useRef, useState } from 'react'
+import type { CSSProperties, Ref } from 'react'
+import { flushSync } from 'react-dom'
 import { MAX_CHAT_LENGTH } from '../../shared/protocol'
 import { chatOpacity, normalizeChat } from '../game/chat'
 import type { GameClient } from '../game/GameClient'
 
 const PLACEHOLDER = '메시지 입력…'
+/** 도킹 모드(터치 기기)에서 입력창이 화면 아래 도구줄과 겹치지 않도록 띄우는 높이. 키보드가 올라오면 바로 위에 붙인다. */
+const DOCK_BOTTOM_PX = 76
+
+export interface CursorChatHandle {
+  /** 입력창을 열고 바로 포커스한다. 버튼을 누른 그 순간 안에서 불러야 iOS에서 키보드가 올라온다. */
+  open: () => void
+}
 
 function isTypingTarget(t: EventTarget | null): boolean {
   const el = t as HTMLElement | null
@@ -12,7 +20,7 @@ function isTypingTarget(t: EventTarget | null): boolean {
 }
 
 /**
- * 피그마 커서 채팅처럼 "/"를 누르면 내 마우스 커서 옆에 입력창이 뜬다.
+ * 피그마 커서 채팅처럼 "/"를 누르면 내 마우스 커서 옆에 입력창이 뜬다. (터치 기기는 버튼으로 열고, 화면 아래에 붙는다.)
  * - 치는 글은 바로 다른 사람 화면의 내 커서 옆에도 보인다. (최대 MAX_CHAT_LENGTH자)
  * - 마지막으로 글을 고친 뒤 3초는 또렷하게, 이어서 5초 동안 서서히 사라진다. (사라지면 입력창도 닫힘)
  * - Enter: 지금까지 쓴 글을 지우고(다른 사람 화면에서도 사라짐) 입력창은 열어 둔다. Esc: 닫기.
@@ -22,18 +30,27 @@ export default function CursorChat({
   client,
   enabled,
   color,
+  dock,
+  onOpen,
+  ref,
 }: {
   client: GameClient
   enabled: boolean
   color: string | undefined
+  /** 터치 기기: 마우스 커서를 따라다니는 대신 화면 아래(키보드 위)에 붙는다. */
+  dock: boolean
+  /** 입력창이 열릴 때 (터치 기기에서 내 커서 위치를 다른 사람에게 알리는 데 쓴다) */
+  onOpen?: () => void
+  ref?: Ref<CursorChatHandle>
 }) {
   const [open, setOpen] = useState(false)
   const [text, setText] = useState('')
-  const [focusTick, setFocusTick] = useState(0)
   const rootRef = useRef<HTMLDivElement>(null)
   const inputRef = useRef<HTMLInputElement>(null)
   const textRef = useRef('')
   textRef.current = text
+  const onOpenRef = useRef(onOpen)
+  onOpenRef.current = onOpen
   const pointer = useRef({ x: window.innerWidth / 2, y: window.innerHeight / 2 })
   const editedAt = useRef(0)
 
@@ -43,6 +60,15 @@ export default function CursorChat({
     setText('')
     setOpen(false)
   }, [client])
+
+  const openChat = useCallback(() => {
+    editedAt.current = performance.now() // 흐려지던 글이 있으면 다시 또렷하게
+    flushSync(() => setOpen(true)) // 입력창을 지금 바로 만들어서
+    inputRef.current?.focus() // 사용자가 누른 순간 안에서 포커스를 준다.
+    onOpenRef.current?.()
+  }, [])
+
+  useImperativeHandle(ref, () => ({ open: openChat }), [openChat])
 
   // 마우스 위치는 열려 있지 않을 때도 계속 기억해 둔다. ("/"를 누른 자리에서 바로 열기 위해)
   useEffect(() => {
@@ -65,25 +91,18 @@ export default function CursorChat({
       const isSlash = e.key === '/' || (e.code === 'Slash' && !e.shiftKey)
       if (!isSlash || isTypingTarget(e.target)) return
       e.preventDefault() // 브라우저의 빠른 검색(Firefox) 등이 뜨지 않게
-      editedAt.current = performance.now() // 흐려지던 글이 있으면 다시 또렷하게
-      setOpen(true)
-      setFocusTick((n) => n + 1)
+      openChat()
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [enabled])
+  }, [enabled, openChat])
 
   // 연결이 끊기는 등 채팅을 쓸 수 없게 되면 닫는다.
   useEffect(() => {
     if (!enabled && open) close()
   }, [enabled, open, close])
 
-  // 열릴 때(또는 "/"를 다시 눌렀을 때) 입력창에 포커스
-  useEffect(() => {
-    if (open) inputRef.current?.focus()
-  }, [open, focusTick])
-
-  // 열려 있는 동안 매 프레임: 마우스를 따라다니고, 글이 있으면 시간에 따라 흐려지다가 닫는다.
+  // 열려 있는 동안 매 프레임: 마우스(또는 화면 아래)에 붙어 있고, 글이 있으면 시간에 따라 흐려지다가 닫는다.
   useEffect(() => {
     if (!open) return
     let raf = 0
@@ -91,10 +110,20 @@ export default function CursorChat({
       raf = requestAnimationFrame(tick)
       const el = rootRef.current
       if (!el) return
-      const { x, y } = pointer.current
-      const left = Math.max(8, Math.min(x + 14, window.innerWidth - el.offsetWidth - 8))
-      const top = Math.max(8, Math.min(y + 20, window.innerHeight - el.offsetHeight - 8))
-      el.style.transform = `translate(${left}px, ${top}px)`
+      if (dock) {
+        // 보이는 화면(visualViewport)의 아래쪽에 둔다. 키보드가 올라오면 키보드 바로 위에 붙는다.
+        const vv = window.visualViewport
+        const vh = vv?.height ?? window.innerHeight
+        const keyboardUp = window.innerHeight - vh > 120
+        const left = (vv?.offsetLeft ?? 0) + 12
+        const top = (vv?.offsetTop ?? 0) + vh - el.offsetHeight - (keyboardUp ? 8 : DOCK_BOTTOM_PX)
+        el.style.transform = `translate(${left}px, ${Math.max(8, top)}px)`
+      } else {
+        const { x, y } = pointer.current
+        const left = Math.max(8, Math.min(x + 14, window.innerWidth - el.offsetWidth - 8))
+        const top = Math.max(8, Math.min(y + 20, window.innerHeight - el.offsetHeight - 8))
+        el.style.transform = `translate(${left}px, ${top}px)`
+      }
       if (textRef.current) {
         const opacity = chatOpacity(performance.now() - editedAt.current)
         el.style.opacity = String(opacity)
@@ -105,7 +134,7 @@ export default function CursorChat({
     }
     raf = requestAnimationFrame(tick)
     return () => cancelAnimationFrame(raf)
-  }, [open, close])
+  }, [open, close, dock])
 
   // 화면을 떠날 때 남아 있는 글은 다른 사람 화면에서도 지운다.
   useEffect(() => {
@@ -117,7 +146,11 @@ export default function CursorChat({
   if (!open) return null
 
   return (
-    <div ref={rootRef} className="cursor-chat" style={{ '--chat-color': color ?? 'var(--accent)' } as CSSProperties}>
+    <div
+      ref={rootRef}
+      className={`cursor-chat${dock ? ' dock' : ''}`}
+      style={{ '--chat-color': color ?? 'var(--accent)' } as CSSProperties}
+    >
       <label className="cursor-chat-pill" data-value={text || PLACEHOLDER}>
         <input
           ref={inputRef}
@@ -129,6 +162,7 @@ export default function CursorChat({
           autoComplete="off"
           autoCorrect="off"
           spellCheck={false}
+          enterKeyHint="send"
           aria-label="커서 채팅"
           onChange={(e) => {
             const next = normalizeChat(e.target.value)

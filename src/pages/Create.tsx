@@ -5,12 +5,14 @@ import { MAX_NAME_LENGTH } from '../../shared/protocol'
 import type { CreateRoomResponse } from '../../shared/protocol'
 import { PuzzleSetupFields, usePuzzleSetup } from '../components/PuzzleSetup'
 import { loadName, saveName } from '../lib/storage'
+import { COARSE_QUERY, useMediaQuery } from '../lib/useMediaQuery'
 import { uploadPuzzle } from '../lib/upload'
 
 export default function Create() {
   const navigate = useNavigate()
   const [name, setName] = useState(loadName)
   const setup = usePuzzleSetup()
+  const coarse = useMediaQuery(COARSE_QUERY)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
 
@@ -52,7 +54,7 @@ export default function Create() {
             onChange={(e) => setName(e.target.value)}
             maxLength={MAX_NAME_LENGTH}
             placeholder="다른 사람에게 보여질 이름"
-            autoFocus={!name}
+            autoFocus={!name && !coarse} // 터치 기기에서는 화면이 열리자마자 키보드가 올라와 화면을 가리지 않게
           />
         </label>
 

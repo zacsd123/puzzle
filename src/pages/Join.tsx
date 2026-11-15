@@ -4,6 +4,7 @@ import { Link, useNavigate } from 'react-router-dom'
 import { MAX_NAME_LENGTH, ROOM_CODE_LENGTH } from '../../shared/protocol'
 import { apiUrl } from '../lib/config'
 import { loadName, saveName } from '../lib/storage'
+import { COARSE_QUERY, useMediaQuery } from '../lib/useMediaQuery'
 
 /** "ABCDE" 뿐 아니라 공유받은 링크 전체를 붙여넣어도 코드를 뽑아낸다. */
 function extractCode(input: string): string {
@@ -18,6 +19,7 @@ export default function Join() {
   const [code, setCode] = useState('')
   const [error, setError] = useState('')
   const [busy, setBusy] = useState(false)
+  const coarse = useMediaQuery(COARSE_QUERY) // 터치 기기에서는 화면이 열리자마자 키보드가 올라와 화면을 가리지 않게
 
   async function onSubmit(e: FormEvent) {
     e.preventDefault()
@@ -55,7 +57,7 @@ export default function Join() {
             onChange={(e) => setName(e.target.value)}
             maxLength={MAX_NAME_LENGTH}
             placeholder="다른 사람에게 보여질 이름"
-            autoFocus={!name}
+            autoFocus={!name && !coarse}
           />
         </label>
 
@@ -66,7 +68,7 @@ export default function Join() {
             value={code}
             onChange={(e) => setCode(e.target.value)}
             placeholder="ABCDE"
-            autoFocus={!!name}
+            autoFocus={!!name && !coarse}
             autoCapitalize="characters"
             autoComplete="off"
             spellCheck={false}

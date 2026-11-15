@@ -59,6 +59,8 @@ export interface GameSnapshot {
 
 const SEND_INTERVAL_MS = 33 // 커서/조각 이동은 초당 약 30번만 전송
 const MAX_RETRIES = 30
+/** 화면으로 돌아왔을 때 보낸 ping에 이 시간 안에 pong이 안 오면 연결이 죽은 것으로 보고 다시 연결한다. */
+const PONG_TIMEOUT_MS = 3000
 
 export class GameClient {
   puzzle: PuzzleConfig | null = null
@@ -94,7 +96,10 @@ export class GameClient {
   private solved = false
   private destroyed = false
   private retry = 0
+  /** 재시도를 다 써서 닫힌 상태인지 (서버가 입장을 거절해서 닫힌 것과 구분한다) */
+  private exhausted = false
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null
+  private pongTimer: ReturnType<typeof setTimeout> | null = null
   private assetsKey = ''
   /** 이 브라우저의 식별값(저장됨)과 이 탭의 식별값(탭마다 다르고 새로고침해도 유지) */
   private readonly token = loadClientId()
@@ -111,6 +116,9 @@ export class GameClient {
     private readonly roomId: string,
     private readonly name: string,
   ) {
+    document.addEventListener('visibilitychange', this.onForeground)
+    window.addEventListener('online', this.onForeground)
+    window.addEventListener('pageshow', this.onForeground)
     this.connect()
   }
 
@@ -228,25 +236,79 @@ export class GameClient {
         console.error('메시지 처리 실패', err)
       }
     }
-    ws.onclose = (ev) => {
-      if (this.destroyed || this.ws !== ws) return
-      this.ws = null
-      this.myHeld = null
-      // 4003 입장 거절, 4004 방 없음, 4005 같은 탭이 다른 연결로 대체됨 → 다시 연결을 시도하지 않는다.
-      const fatal = ev.code === 4003 || ev.code === 4004 || ev.code === 4005 || this.error !== null
-      if (fatal || this.retry >= MAX_RETRIES) {
-        if (!this.error) this.error = '서버와 연결이 끊어졌어요.'
-        this.setStatus('closed')
-        return
-      }
-      this.setStatus('reconnecting')
-      const delay = Math.min(1000 * ++this.retry, 5000)
-      this.reconnectTimer = setTimeout(() => this.connect(), delay)
+    ws.onclose = (ev) => this.onSocketClosed(ws, ev.code)
+  }
+
+  private onSocketClosed(ws: WebSocket, code: number) {
+    if (this.destroyed || this.ws !== ws) return
+    this.ws = null
+    this.myHeld = null
+    this.clearPongTimer()
+    // 4003 입장 거절, 4004 방 없음, 4005 같은 탭이 다른 연결로 대체됨 → 다시 연결을 시도하지 않는다.
+    const fatal = code === 4003 || code === 4004 || code === 4005 || this.error !== null
+    if (fatal) {
+      if (!this.error) this.error = '서버와 연결이 끊어졌어요.'
+      this.setStatus('closed')
+      return
     }
+    if (this.retry >= MAX_RETRIES) {
+      // 재시도를 다 썼다. 화면으로 돌아오거나 네트워크가 다시 잡히면 한 번 더 시도한다. (onForeground)
+      this.exhausted = true
+      this.error = '서버와 연결이 끊어졌어요.'
+      this.setStatus('closed')
+      return
+    }
+    this.setStatus('reconnecting')
+    const delay = Math.min(1000 * ++this.retry, 5000)
+    this.reconnectTimer = setTimeout(() => this.connect(), delay)
+  }
+
+  /**
+   * 휴대폰이 백그라운드에서 돌아오거나 네트워크가 다시 잡혔을 때, 다음 재시도를 기다리지 않고 바로 연결을 확인/복구한다.
+   * (iOS는 화면이 꺼져 있던 연결이 끊긴 줄 모르고 "열림"으로 남겨 두기도 한다.)
+   */
+  private onForeground = () => {
+    if (this.destroyed || document.visibilityState === 'hidden') return
+    const ws = this.ws
+    if (ws === null) {
+      if (this.status === 'reconnecting' || this.exhausted) {
+        if (this.reconnectTimer) clearTimeout(this.reconnectTimer)
+        this.reconnectTimer = null
+        this.exhausted = false
+        this.error = null
+        this.retry = 0
+        this.setStatus('reconnecting')
+        this.connect()
+      }
+      return
+    }
+    if (ws.readyState !== WebSocket.OPEN) return
+    // 열려 있는 것처럼 보여도 실제로는 끊겼을 수 있다. 확인해서 응답이 없으면 끊고 다시 연결한다.
+    this.clearPongTimer()
+    this.send({ t: 'ping' })
+    this.pongTimer = setTimeout(() => {
+      if (this.ws !== ws) return
+      ws.onclose = null
+      try {
+        ws.close()
+      } catch {
+        /* 이미 닫힘 */
+      }
+      this.onSocketClosed(ws, 1006)
+    }, PONG_TIMEOUT_MS)
+  }
+
+  private clearPongTimer() {
+    if (this.pongTimer) clearTimeout(this.pongTimer)
+    this.pongTimer = null
   }
 
   destroy() {
     this.destroyed = true
+    document.removeEventListener('visibilitychange', this.onForeground)
+    window.removeEventListener('online', this.onForeground)
+    window.removeEventListener('pageshow', this.onForeground)
+    this.clearPongTimer()
     if (this.reconnectTimer) clearTimeout(this.reconnectTimer)
     if (this.flushTimer) clearTimeout(this.flushTimer)
     this.ws?.close()
@@ -293,6 +355,9 @@ export class GameClient {
       case 'host':
         this.hostId = msg.id
         this.publish()
+        break
+      case 'pong':
+        this.clearPongTimer()
         break
       case 'player_join':
         this.players.set(msg.player.id, this.newPlayer(msg.player))

@@ -34,6 +34,28 @@ const IDLE_REDRAW_MS = 1000
 /** 다른 사람 커서가 이 시간 동안 안 움직이면 흐리게 그린다. */
 const CURSOR_IDLE_MS = 6000
 
+// ---- 터치 조작 ----
+/** 손가락(펜)으로 조각을 누를 때 조금 빗나가도 가까운 조각을 집어 주는 여유. (화면 px) 마우스는 정확히 눌러야 한다. */
+const TOUCH_SLOP_PX = 16
+const PEN_SLOP_PX = 8
+/** 손가락으로 조각을 집으면 손가락에 가려지지 않게 이만큼 위로 띄운다. (화면 px) */
+const TOUCH_LIFT_PX = 28
+/** 손가락(펜)으로 조각을 끌다가 화면 가장자리 이 거리 안에 들어가면 화면이 그쪽으로 따라 움직인다. (화면 px) */
+const EDGE_PAN_ZONE_PX = 56
+/** 가장자리 끝에서의 화면 이동 속도 (화면 px/초). 가장자리에서 멀어질수록 느려진다. */
+const EDGE_PAN_SPEED = 650
+
+/** roundRect가 없는 브라우저(iOS 15 이하 등)에서도 쓸 수 있게 직접 만든 둥근 사각형 경로 */
+function roundRectPath(ctx: CanvasRenderingContext2D, x: number, y: number, w: number, h: number, radius: number) {
+  const r = Math.min(radius, w / 2, h / 2)
+  ctx.moveTo(x + r, y)
+  ctx.arcTo(x + w, y, x + w, y + h, r)
+  ctx.arcTo(x + w, y + h, x, y + h, r)
+  ctx.arcTo(x, y + h, x, y, r)
+  ctx.arcTo(x, y, x + w, y, r)
+  ctx.closePath()
+}
+
 /** 고정된 조각을 월드 좌표 그대로(배율 1) 모아 둔 그림. 왼쪽 위가 월드 (-pad, -pad). */
 interface LockedLayer {
   canvas: HTMLCanvasElement
@@ -89,6 +111,17 @@ export class BoardView {
   private cursorIdleDrawn = new Map<string, boolean>()
   /** 마지막으로 그린 자유 조각들 (z 오름차순). 히트 테스트에서 위에 있는 조각부터 검사하는 데 쓴다. */
   private drawOrder: number[] = []
+  // ---- 여러 손가락 ----
+  /** 지금 화면에 닿아 있는 손가락/펜/마우스의 화면 좌표 */
+  private pointers = new Map<number, { x: number; y: number }>()
+  /** 두 손가락으로 확대·이동 중이면, 시작할 때의 두 손가락 간격/배율과 중심 아래에 있던 월드 좌표 */
+  private pinch: { startDist: number; startScale: number; wx: number; wy: number } | null = null
+  /** 조각을 들고 있는 동안 닿은 다른 손가락들. 확대/이동으로 쓰지 않고 무시한다. */
+  private ignored = new Set<number>()
+  /** 조각을 끄는 포인터의 종류와 마지막 화면 좌표 (가장자리 자동 이동에 쓴다) */
+  private dragPointer: { x: number; y: number; type: string } | null = null
+  /** 내 커서 위치를 서버에 한 번이라도 보냈는지 (터치 기기는 끌기 전까지 커서가 없다) */
+  private cursorSent = false
 
   constructor(
     private canvas: HTMLCanvasElement,
@@ -107,7 +140,7 @@ export class BoardView {
 
     this.ro = new ResizeObserver(() => this.resize())
     this.ro.observe(canvas)
-    document.addEventListener('visibilitychange', this.invalidate)
+    document.addEventListener('visibilitychange', this.onVisibility)
     this.resize()
     this.raf = requestAnimationFrame(this.frame)
   }
@@ -117,10 +150,26 @@ export class BoardView {
     this.dirty = true
   }
 
+  private onVisibility = () => {
+    // 화면이 가려지면 닿아 있던 손가락 정보는 믿을 수 없다. 들고 있던 조각은 그 자리에 내려놓는다.
+    if (document.hidden) this.cancelGestures()
+    this.dirty = true
+  }
+
+  private cancelGestures() {
+    const drag = this.drag
+    this.drag = null
+    this.pinch = null
+    this.pointers.clear()
+    this.ignored.clear()
+    this.dragPointer = null
+    if (drag?.kind === 'piece' && this.client.myHeld === drag.id) this.client.endDrag(drag.id)
+  }
+
   destroy() {
     cancelAnimationFrame(this.raf)
     this.ro.disconnect()
-    document.removeEventListener('visibilitychange', this.invalidate)
+    document.removeEventListener('visibilitychange', this.onVisibility)
     const c = this.canvas
     c.removeEventListener('pointerdown', this.onPointerDown)
     c.removeEventListener('pointermove', this.onPointerMove)
@@ -217,18 +266,68 @@ export class BoardView {
     this.zoomAt(sx, sy, this.cam.scale * Math.exp(-e.deltaY * 0.0012))
   }
 
+  /** 포인터 종류별로 조각을 누를 때 봐 주는 여유(화면 px) */
+  private slopFor(pointerType: string): number {
+    return pointerType === 'touch' ? TOUCH_SLOP_PX : pointerType === 'pen' ? PEN_SLOP_PX : 0
+  }
+
+  private sendCursorAt(x: number, y: number) {
+    this.client.sendCursor(x, y)
+    this.cursorSent = true
+  }
+
+  /**
+   * 내 커서가 아직 다른 사람 화면에 없으면 지금 보고 있는 화면의 한가운데에 둔다.
+   * (터치 기기는 조각을 끌기 전까지 커서가 없어서, 채팅을 해도 말풍선이 붙을 자리가 없기 때문이다.)
+   */
+  announceCursor() {
+    if (this.cursorSent || !this.client.puzzle || this.width === 0) return
+    const { x, y } = this.toWorld(this.width / 2, this.height / 2)
+    this.sendCursorAt(x, y)
+  }
+
+  private releaseCapture(pointerId: number) {
+    try {
+      if (this.canvas.hasPointerCapture(pointerId)) this.canvas.releasePointerCapture(pointerId)
+    } catch {
+      /* 이미 사라진 포인터 */
+    }
+  }
+
   private onPointerDown = (e: PointerEvent) => {
     if (!this.client.assets || !this.client.puzzle) return
-    this.canvas.setPointerCapture(e.pointerId)
+    try {
+      this.canvas.setPointerCapture(e.pointerId)
+    } catch {
+      /* 포인터가 이미 사라졌거나 캡처할 수 없는 환경이어도 입력은 계속 처리한다. */
+    }
+    // 조각을 들고 있는 동안 닿은 다른 손가락은 확대/이동이 아니라 실수로 닿은 것으로 보고 무시한다.
+    if (this.drag?.kind === 'piece') {
+      this.ignored.add(e.pointerId)
+      return
+    }
     const { sx, sy } = this.toScreen(e)
+    this.pointers.set(e.pointerId, { x: sx, y: sy })
+
+    // 두 번째 손가락이 닿으면 확대/이동 모드. 하던 화면 끌기는 멈춘다.
+    if (this.pointers.size >= 2) {
+      this.drag = null
+      this.startPinch()
+      return
+    }
+
     const { x, y } = this.toWorld(sx, sy)
+    if (e.pointerType !== 'mouse') this.sendCursorAt(x, y) // 터치/펜은 닿는 순간부터 다른 사람에게 위치를 보여 준다.
 
     if (e.button === 0) {
-      const id = this.hitTest(x, y)
+      const id = this.hitTest(x, y, this.slopFor(e.pointerType) / this.cam.scale)
       if (id !== null && this.client.beginGrab(id)) {
         const piece = this.client.pieces[id]
-        this.drag = { kind: 'piece', id, dx: x - piece.x, dy: y - piece.y }
+        const lift = e.pointerType === 'touch' ? TOUCH_LIFT_PX / this.cam.scale : 0
+        this.drag = { kind: 'piece', id, dx: x - piece.x, dy: y - piece.y + lift }
+        this.dragPointer = { x: sx, y: sy, type: e.pointerType }
         this.canvas.style.cursor = 'grabbing'
+        if (lift > 0) this.client.dragTo(id, x - this.drag.dx, y - this.drag.dy) // 집자마자 손가락 위로 올라와서 "집었다"는 게 보이게
         return
       }
     }
@@ -237,20 +336,62 @@ export class BoardView {
     this.canvas.style.cursor = 'move'
   }
 
+  /** 닿아 있는 손가락 두 개의 간격과 중심 */
+  private pinchMetrics() {
+    const [a, b] = [...this.pointers.values()]
+    return { dist: Math.max(1, Math.hypot(a.x - b.x, a.y - b.y)), cx: (a.x + b.x) / 2, cy: (a.y + b.y) / 2 }
+  }
+
+  private startPinch() {
+    const { dist, cx, cy } = this.pinchMetrics()
+    const { x, y } = this.toWorld(cx, cy)
+    this.pinch = { startDist: dist, startScale: this.cam.scale, wx: x, wy: y }
+    this.userMoved = true
+  }
+
+  /** 두 손가락의 간격에 맞춰 확대하고, 중심이 움직인 만큼 화면도 함께 옮긴다. */
+  private updatePinch() {
+    const pinch = this.pinch
+    if (!pinch) return
+    const { dist, cx, cy } = this.pinchMetrics()
+    const scale = Math.min(MAX_SCALE, Math.max(this.minScale, (pinch.startScale * dist) / pinch.startDist))
+    this.cam.scale = scale
+    // 처음에 두 손가락 가운데 있던 월드 좌표가 지금 두 손가락 가운데에 그대로 있도록 한다.
+    this.cam.ox = cx - pinch.wx * scale
+    this.cam.oy = cy - pinch.wy * scale
+    this.userMoved = true
+    this.dirty = true
+  }
+
   private onPointerMove = (e: PointerEvent) => {
     const puzzle = this.client.puzzle
     if (!puzzle || !this.client.assets) return
+    if (this.ignored.has(e.pointerId)) return
     const { sx, sy } = this.toScreen(e)
+    const tracked = this.pointers.get(e.pointerId)
+    if (tracked) {
+      tracked.x = sx
+      tracked.y = sy
+    }
+    if (this.pinch && this.pointers.size >= 2) {
+      this.updatePinch()
+      return
+    }
     const { x, y } = this.toWorld(sx, sy)
-    this.client.sendCursor(x, y)
+    this.sendCursorAt(x, y)
 
     const drag = this.drag
     if (drag?.kind === 'piece') {
       if (this.client.myHeld !== drag.id) {
         // 다른 사람이 먼저 잡았다 → 내 드래그 취소
         this.drag = null
+        this.dragPointer = null
         this.canvas.style.cursor = 'default'
         return
+      }
+      if (this.dragPointer) {
+        this.dragPointer.x = sx
+        this.dragPointer.y = sy
       }
       // 테이블 밖으로 나가지 않도록 하는 제한은 덩어리 크기를 아는 GameClient가 처리한다.
       this.client.dragTo(drag.id, x - drag.dx, y - drag.dy)
@@ -261,19 +402,74 @@ export class BoardView {
       drag.lastX = sx
       drag.lastY = sy
       this.dirty = true
-    } else {
+    } else if (e.pointerType === 'mouse') {
       this.canvas.style.cursor = this.hitTest(x, y) !== null ? 'grab' : 'default'
     }
   }
 
   private onPointerUp = (e: PointerEvent) => {
+    if (this.ignored.delete(e.pointerId)) {
+      this.releaseCapture(e.pointerId)
+      return
+    }
+    if (!this.pointers.has(e.pointerId)) return // 처음부터 추적하지 않던 포인터 (예: 불러오는 중에 닿은 것)
+    this.pointers.delete(e.pointerId)
+    this.releaseCapture(e.pointerId)
+    this.canvas.style.cursor = 'default'
+
+    if (this.pinch) {
+      // 두 손가락 중 하나를 떼면 확대는 끝난다. 남은 손가락으로는 이어서 화면을 끌 수 있게 해서 화면이 튀지 않게 한다.
+      if (this.pointers.size < 2) {
+        this.pinch = null
+        const rest = [...this.pointers.values()][0]
+        this.drag = rest ? { kind: 'pan', lastX: rest.x, lastY: rest.y } : null
+      }
+      return
+    }
+
     const drag = this.drag
     this.drag = null
-    if (this.canvas.hasPointerCapture(e.pointerId)) this.canvas.releasePointerCapture(e.pointerId)
-    this.canvas.style.cursor = 'default'
+    this.dragPointer = null
     if (drag?.kind === 'piece' && this.client.myHeld === drag.id) {
       this.client.endDrag(drag.id)
     }
+  }
+
+  /**
+   * 손가락(펜)으로 조각을 끌다가 가장자리에 가까워지면 화면을 그쪽으로 옮긴다.
+   * 화면이 작으면 조각을 놓았다가 화면을 밀고 다시 집는 일을 반복해야 하기 때문이다. (마우스는 휠/드래그가 있어서 쓰지 않는다.)
+   * 화면 가장자리가 이미 테이블 밖이면 더는 밀지 않는다. 움직였으면 true.
+   */
+  private autoPan(dt: number): boolean {
+    const drag = this.drag
+    const pointer = this.dragPointer
+    const puzzle = this.client.puzzle
+    if (drag?.kind !== 'piece' || !pointer || pointer.type === 'mouse' || !puzzle) return false
+    const zone = EDGE_PAN_ZONE_PX
+    // 가장자리로 갈수록 1에 가까워지는 값. 화면이 움직이는 방향은 가장자리의 반대쪽이다.
+    const push = (pos: number, size: number) => (pos < zone ? (zone - pos) / zone : pos > size - zone ? -(pos - (size - zone)) / zone : 0)
+    let vx = push(pointer.x, this.width)
+    let vy = push(pointer.y, this.height)
+    if (vx === 0 && vy === 0) return false
+
+    const { bounds } = puzzle
+    const s = this.cam.scale
+    const left = -this.cam.ox / s
+    const right = (this.width - this.cam.ox) / s
+    const top = -this.cam.oy / s
+    const bottom = (this.height - this.cam.oy) / s
+    if ((vx > 0 && left <= bounds.minX) || (vx < 0 && right >= bounds.maxX)) vx = 0
+    if ((vy > 0 && top <= bounds.minY) || (vy < 0 && bottom >= bounds.maxY)) vy = 0
+    if (vx === 0 && vy === 0) return false
+
+    this.cam.ox += Math.min(1, Math.abs(vx)) * Math.sign(vx) * EDGE_PAN_SPEED * dt
+    this.cam.oy += Math.min(1, Math.abs(vy)) * Math.sign(vy) * EDGE_PAN_SPEED * dt
+    this.userMoved = true
+    this.dirty = true
+    // 손가락은 그대로인데 화면이 움직였으니, 들고 있는 조각도 손가락 아래(위로 띄운 만큼 위)로 따라가게 한다.
+    const { x, y } = this.toWorld(pointer.x, pointer.y)
+    this.client.dragTo(drag.id, x - drag.dx, y - drag.dy)
+    return true
   }
 
   /**
@@ -313,8 +509,11 @@ export class BoardView {
     return layer
   }
 
-  /** 월드 좌표 (wx, wy) 위에 있는, 내가 집을 수 있는 가장 위쪽 조각 */
-  private hitTest(wx: number, wy: number): number | null {
+  /**
+   * 월드 좌표 (wx, wy) 위에 있는, 내가 집을 수 있는 가장 위쪽 조각.
+   * 조각 위가 아니어도 slop(월드 단위) 안에 조각 윤곽이 있으면, 그중 중심이 가장 가까운 조각을 돌려준다. (손가락은 정확히 못 누른다)
+   */
+  private hitTest(wx: number, wy: number, slop = 0): number | null {
     const assets = this.client.assets
     if (!assets) return null
     const { geo } = assets
@@ -327,15 +526,36 @@ export class BoardView {
       if (lx < -geo.pad || ly < -geo.pad || lx > geo.pw + geo.pad || ly > geo.ph + geo.pad) continue
       if (this.hitCtx.isPointInPath(geo.paths[piece.id], lx, ly)) return piece.id
     }
-    return null
+    if (slop <= 0) return null
+
+    const hc = this.hitCtx
+    hc.lineWidth = slop * 2 // 윤곽선을 이만큼 두껍게 쳤을 때 그 안에 들어오면 "근처"다.
+    hc.lineJoin = 'round'
+    let best: number | null = null
+    let bestDist = Infinity
+    for (let i = this.drawOrder.length - 1; i >= 0; i--) {
+      const piece = this.client.pieces[this.drawOrder[i]]
+      if (piece.locked || (piece.heldBy !== null && piece.heldBy !== me)) continue
+      const lx = wx - piece.x
+      const ly = wy - piece.y
+      if (lx < -geo.pad - slop || ly < -geo.pad - slop || lx > geo.pw + geo.pad + slop || ly > geo.ph + geo.pad + slop) continue
+      if (!hc.isPointInStroke(geo.paths[piece.id], lx, ly)) continue
+      const d = Math.hypot(lx - geo.pw / 2, ly - geo.ph / 2)
+      if (d < bestDist) {
+        bestDist = d
+        best = piece.id
+      }
+    }
+    return best
   }
 
   // ---------- 렌더링 ----------
   private frame = (t: number) => {
     this.raf = requestAnimationFrame(this.frame)
-    const dt = Math.min(0.1, (t - this.lastTime) / 1000)
+    const dt = Math.max(0, Math.min(0.1, (t - this.lastTime) / 1000)) // 시각이 거꾸로 가는 일이 있어도 화면이 반대로 튀지 않게
     this.lastTime = t
-    const moving = this.client.step(dt) // 상태 갱신은 매 프레임 하지만(싸다), 그리기는 바뀐 게 있을 때만 한다.
+    const panned = this.autoPan(dt)
+    const moving = this.client.step(dt) || panned // 상태 갱신은 매 프레임 하지만(싸다), 그리기는 바뀐 게 있을 때만 한다.
     if (this.needsRedraw(performance.now(), moving)) this.draw()
   }
 
@@ -571,7 +791,7 @@ export class BoardView {
     ctx.font = '600 12px system-ui, -apple-system, "Segoe UI", "Malgun Gothic", sans-serif'
     const w = ctx.measureText(name).width + 14
     ctx.beginPath()
-    ctx.roundRect(11, 19, w, 20, 10)
+    roundRectPath(ctx, 11, 19, w, 20, 10)
     ctx.fillStyle = color
     ctx.fill()
     ctx.fillStyle = '#fff'
@@ -585,7 +805,7 @@ export class BoardView {
       const bx = Math.min(11, this.width - 8 - x - bw)
       ctx.globalAlpha = alpha * chat.alpha
       ctx.beginPath()
-      ctx.roundRect(bx, 44, bw, 28, 14)
+      roundRectPath(ctx, bx, 44, bw, 28, 14)
       ctx.fillStyle = color
       ctx.fill()
       ctx.lineWidth = 1.5
