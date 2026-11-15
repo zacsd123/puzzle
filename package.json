@@ -12,9 +12,11 @@
     "typecheck": "tsc -b"
   },
   "dependencies": {
+    "cross-env": "^10.1.0",
     "react": "^19.3.1",
     "react-dom": "^19.3.1",
     "react-router-dom": "^7.18.5",
+    "tsx": "^4.23.15",
     "ws": "^8.23.0"
   },
   "devDependencies": {
@@ -24,8 +26,6 @@
     "@types/ws": "^8.18.2",
     "@vitejs/plugin-react": "^6.3.0",
     "concurrently": "^10.0.7",
-    "cross-env": "^10.1.0",
-    "tsx": "^4.23.15",
     "typescript": "^7.0.2",
     "vite": "^8.3.8"
   },
