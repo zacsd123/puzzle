@@ -49,6 +49,8 @@ export interface GameSnapshot {
   error: string | null
   players: PlayerInfo[]
   meId: string | null
+  /** 방장 플레이어 id. 퍼즐을 완성하면 방장이 새 사진으로 다시 시작할 수 있다. */
+  hostId: string | null
   /** 남은 덩어리 수 (1이면 완성) */
   groups: number
   total: number
@@ -76,10 +78,12 @@ export class GameClient {
     error: null,
     players: [],
     meId: null,
+    hostId: null,
     groups: 0,
     total: 0,
     solved: false,
   }
+  private hostId: string | null = null
   private status: ConnectionStatus = 'connecting'
   private error: string | null = null
   private solved = false
@@ -120,6 +124,7 @@ export class GameClient {
       error: this.error,
       players: [...this.players.values()].map((p) => p.info),
       meId: this.meId,
+      hostId: this.hostId,
       groups: this.groupMap.size,
       total: this.pieces.length,
       solved: this.solved,
@@ -251,22 +256,37 @@ export class GameClient {
   private handle(msg: ServerMessage) {
     switch (msg.t) {
       case 'welcome': {
+        // 입장할 때뿐 아니라, 방장이 새 퍼즐을 시작했을 때도 모두에게 온다. (그때는 사진/격자가 통째로 바뀐다)
         this.retry = 0
         this.puzzle = msg.puzzle
         this.meId = msg.you
+        this.hostId = msg.host
         this.solved = msg.solved
         this.myHeld = null
         this.effects = []
         this.pieces = msg.pieces.map((p) => ({ ...p, tx: p.x, ty: p.y }))
         this.rebuildGroups()
         this.maxZ = this.pieces.reduce((m, p) => Math.max(m, p.z), 0)
-        this.players = new Map(msg.players.map((info) => [info.id, this.newPlayer(info)]))
-        if (this.assets && this.assetsKey === this.assetKeyFor(msg.puzzle)) this.status = 'ready'
-        else this.status = 'loading'
+        // 이미 보고 있던 사람의 커서 위치/채팅은 새 퍼즐이 시작돼도 그대로 둔다.
+        const prev = this.players
+        this.players = new Map(
+          msg.players.map((info) => {
+            const old = prev.get(info.id)
+            return [info.id, old ? { ...old, info } : this.newPlayer(info)]
+          }),
+        )
+        const sameAssets = this.assetsKey === this.assetKeyFor(msg.puzzle)
+        // 다른 퍼즐의 이미지/조각 그림으로 새 조각을 그리지 않도록 버린다.
+        if (!sameAssets) this.assets = null
+        this.status = this.assets && sameAssets ? 'ready' : 'loading'
         this.publish()
         void this.loadAssets(msg.puzzle)
         break
       }
+      case 'host':
+        this.hostId = msg.id
+        this.publish()
+        break
       case 'player_join':
         this.players.set(msg.player.id, this.newPlayer(msg.player))
         this.publish()

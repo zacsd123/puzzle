@@ -1,6 +1,7 @@
 import { randomBytes, randomInt } from 'node:crypto'
 import type { WebSocket } from 'ws'
 import {
+  CLIENT_TOKEN_PATTERN,
   MAX_CHAT_LENGTH,
   MAX_NAME_LENGTH,
   ROOM_CODE_ALPHABET,
@@ -23,7 +24,6 @@ const MAX_ROOMS = 100
 const EMPTY_ROOM_TTL_MS = 6 * 60 * 60 * 1000
 /** 방마다 기억해 둘 "나간 사람" 기록 수. 이보다 많아지면 가장 오래된 것부터 잊는다. */
 const MAX_RECORDS = 200
-const TOKEN_PATTERN = /^[A-Za-z0-9_-]{16,64}$/
 
 const PLAYER_COLORS = [
   '#ef4444',
@@ -61,8 +61,18 @@ function isNum(v: unknown): v is number {
   return typeof v === 'number' && Number.isFinite(v)
 }
 
-function sanitizeToken(raw: unknown): string | null {
-  return typeof raw === 'string' && TOKEN_PATTERN.test(raw) ? raw : null
+export function sanitizeToken(raw: unknown): string | null {
+  return typeof raw === 'string' && CLIENT_TOKEN_PATTERN.test(raw) ? raw : null
+}
+
+/** 퍼즐 하나를 이루는 값. 방을 만들 때와 새 퍼즐을 시작할 때 쓴다. */
+export interface PuzzleSetup {
+  cols: number
+  rows: number
+  imageWidth: number
+  imageHeight: number
+  image: Buffer
+  mime: string
 }
 
 /** 입력 도중의 글이므로 끝의 공백은 남기고, 제어문자/줄바꿈만 정리해서 MAX_CHAT_LENGTH자로 자른다. */
@@ -90,32 +100,36 @@ function send(ws: WebSocket, msg: ServerMessage) {
 
 export class Room {
   readonly id: string
-  readonly puzzle: PuzzleConfig
-  readonly image: Buffer
-  readonly mime: string
+  // 퍼즐 한 판에 해당하는 값들. 방장이 새 퍼즐을 시작하면 setup()이 통째로 새로 채운다.
+  puzzle!: PuzzleConfig
+  image!: Buffer
+  mime!: string
   lastActive = Date.now()
   solved = false
 
-  private readonly pw: number
-  private readonly ph: number
-  private pieces: PieceState[]
+  private pw = 0
+  private ph = 0
+  private pieces: PieceState[] = []
   private players = new Map<string, Player>()
   /** 지금 접속 중인 사람들의 token → 플레이어 */
   private byToken = new Map<string, Player>()
   /** 나간 사람들의 token → 기록. 다시 들어오면 이어서 쓴다. */
   private records = new Map<string, PlayerRecord>()
   private zCounter = 0
+  /** 몇 번째 판인지. 사진 주소에 붙여서 브라우저가 이전 판의 사진을 재사용하지 않게 한다. */
+  private round = 0
+  /** 방을 만든 브라우저의 식별값. 이 값으로 들어온 참가자가 방장이다. */
+  private readonly ownerToken: string | null
+  private hostId: string | null = null
 
-  constructor(opts: {
-    id: string
-    cols: number
-    rows: number
-    imageWidth: number
-    imageHeight: number
-    image: Buffer
-    mime: string
-  }) {
+  constructor(opts: PuzzleSetup & { id: string; ownerToken: string | null }) {
     this.id = opts.id
+    this.ownerToken = opts.ownerToken
+    this.setup(opts)
+  }
+
+  /** 새 퍼즐(사진, 격자, 조각 배치)로 방을 채운다. 참가자/기록은 건드리지 않는다. */
+  private setup(opts: PuzzleSetup) {
     this.image = opts.image
     this.mime = opts.mime
 
@@ -127,23 +141,80 @@ export class Room {
       maxY: opts.imageHeight + margin,
     }
     this.puzzle = {
-      roomId: opts.id,
+      roomId: this.id,
       cols: opts.cols,
       rows: opts.rows,
       imageWidth: opts.imageWidth,
       imageHeight: opts.imageHeight,
       seed: randomInt(1, 2 ** 31 - 1),
       bounds,
-      imageUrl: `/api/rooms/${opts.id}/image`,
+      imageUrl: `/api/rooms/${this.id}/image?v=${this.round}`,
     }
     const { pw, ph } = cellSize(this.puzzle)
     this.pw = pw
     this.ph = ph
+    this.zCounter = 0
+    this.solved = false
     this.pieces = this.scatter()
   }
 
   get playerCount() {
     return this.players.size
+  }
+
+  // ---------- 방장 / 새 퍼즐 ----------
+  /** 방장은 방을 만든 브라우저로 들어온 참가자. 그 사람이 없으면 가장 먼저 들어와 있는 참가자가 맡는다. */
+  private computeHost(): string | null {
+    if (this.ownerToken) {
+      const owner = this.byToken.get(this.ownerToken)
+      if (owner) return owner.info.id
+    }
+    const first = this.players.values().next().value
+    return first ? first.info.id : null
+  }
+
+  /** 방장을 다시 계산한다. 바뀌었으면 true. */
+  private refreshHost(): boolean {
+    const next = this.computeHost()
+    if (next === this.hostId) return false
+    this.hostId = next
+    return true
+  }
+
+  /** 지금 방장인 참가자의 식별값과 같은지. (새 퍼즐 시작 요청이 방장에게서 온 것인지 확인) */
+  isHostToken(token: string): boolean {
+    const host = this.hostId ? this.players.get(this.hostId) : undefined
+    return !!host?.token && host.token === token
+  }
+
+  /**
+   * 퍼즐을 완성한 뒤 방장이 새 사진으로 다시 시작한다. 완성 전이면 false.
+   * 참가자는 그대로 두고 점수는 0으로 돌리며, 모두에게 새 퍼즐을 보낸다.
+   */
+  restart(opts: PuzzleSetup): boolean {
+    if (!this.solved) return false
+    this.round++
+    this.setup(opts)
+    this.records.clear() // 점수는 한 판 단위다. 나가 있던 사람의 이전 판 기록도 비운다.
+    for (const p of this.players.values()) {
+      p.holding = null
+      p.info.placed = 0
+    }
+    this.lastActive = Date.now()
+    for (const p of this.players.values()) this.sendWelcome(p)
+    return true
+  }
+
+  private sendWelcome(player: Player) {
+    send(player.ws, {
+      t: 'welcome',
+      you: player.info.id,
+      puzzle: this.puzzle,
+      pieces: this.pieces,
+      players: [...this.players.values()].map((p) => p.info),
+      solved: this.solved,
+      host: this.hostId,
+    })
   }
 
   summary(): RoomSummary {
@@ -317,15 +388,10 @@ export class Room {
     if (token) this.byToken.set(token, player)
     this.lastActive = Date.now()
 
-    send(ws, {
-      t: 'welcome',
-      you: player.info.id,
-      puzzle: this.puzzle,
-      pieces: this.pieces,
-      players: [...this.players.values()].map((p) => p.info),
-      solved: this.solved,
-    })
+    const hostChanged = this.refreshHost() // welcome에 최신 방장이 담기도록 먼저 계산
+    this.sendWelcome(player)
     this.broadcast({ t: 'player_join', player: player.info }, player.info.id)
+    if (hostChanged) this.broadcast({ t: 'host', id: this.hostId }, player.info.id)
     return player
   }
 
@@ -339,6 +405,7 @@ export class Room {
     }
     this.lastActive = Date.now()
     this.broadcast({ t: 'player_leave', id: player.info.id })
+    if (this.refreshHost()) this.broadcast({ t: 'host', id: this.hostId })
   }
 
   // ---------- 메시지 처리 ----------
@@ -512,14 +579,7 @@ export class RoomManager {
     return this.rooms.get(id.toUpperCase())
   }
 
-  create(opts: {
-    cols: number
-    rows: number
-    imageWidth: number
-    imageHeight: number
-    image: Buffer
-    mime: string
-  }): Room | null {
+  create(opts: PuzzleSetup & { ownerToken: string | null }): Room | null {
     if (this.rooms.size >= MAX_ROOMS) {
       this.sweep(0) // 비어있는 방부터 정리해 본다.
       if (this.rooms.size >= MAX_ROOMS) return null

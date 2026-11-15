@@ -1,3 +1,5 @@
+import { CLIENT_TOKEN_PATTERN } from '../../shared/protocol'
+
 const NAME_KEY = 'puzzle-party:name'
 const CLIENT_KEY = 'puzzle-party:client-id'
 const TAB_KEY = 'puzzle-party:tab-id'
@@ -37,7 +39,7 @@ let memoryTabId: string | null = null
 export function loadClientId(): string {
   try {
     const saved = localStorage.getItem(CLIENT_KEY)
-    if (saved && /^[A-Za-z0-9_-]{16,64}$/.test(saved)) return saved
+    if (saved && CLIENT_TOKEN_PATTERN.test(saved)) return saved
     const fresh = randomId()
     localStorage.setItem(CLIENT_KEY, fresh)
     return fresh

@@ -738,6 +738,40 @@ input:focus {
   margin: 0;
 }
 
+/* 사진/난이도를 고르는 창처럼 내용이 긴 모달 */
+.modal.wide {
+  max-width: 460px;
+  max-height: calc(100vh - 40px);
+  overflow: auto;
+  text-align: left;
+}
+
+.modal.wide h2 {
+  font-size: 22px;
+}
+
+.modal.wide .modal-actions {
+  justify-content: flex-end;
+}
+
+/* 버튼이 셋일 때: 주 버튼은 한 줄을 다 쓰고, 나머지는 그 아래에 나란히 */
+.modal-actions.wrap {
+  flex-wrap: wrap;
+}
+
+.modal-actions.wrap .btn.primary {
+  flex: 1 1 100%;
+}
+
+.modal-actions .btn {
+  white-space: nowrap;
+}
+
+.host-badge {
+  color: #1b1300;
+  background: #fbbf24;
+}
+
 .trophy {
   font-size: 52px;
   line-height: 1;

@@ -6,9 +6,9 @@ import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { WebSocketServer } from 'ws'
 import type { WebSocket } from 'ws'
-import { MAX_GRID, MAX_IMAGE_BYTES, MAX_PIECES, MIN_GRID } from '../shared/protocol'
+import { CLIENT_TOKEN_HEADER, MAX_GRID, MAX_IMAGE_BYTES, MAX_PIECES, MIN_GRID } from '../shared/protocol'
 import type { CreateRoomResponse } from '../shared/protocol'
-import { RoomManager } from './rooms'
+import { RoomManager, sanitizeToken } from './rooms'
 import type { Room } from './rooms'
 
 // 호스팅 환경이 PORT를 주는 경우를 지원하되, PUZZLE_PORT가 있으면 그것을 우선한다.
@@ -91,7 +91,24 @@ function setCors(req: IncomingMessage, res: ServerResponse) {
   res.setHeader('Access-Control-Allow-Origin', ALLOWED_ORIGIN === '*' ? '*' : origin && allowed.includes(origin) ? origin : allowed[0])
   res.setHeader('Vary', 'Origin')
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS')
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type')
+  res.setHeader('Access-Control-Allow-Headers', `Content-Type, ${CLIENT_TOKEN_HEADER}`)
+}
+
+/** 요청 헤더의 브라우저 식별값. 방을 만든 사람(방장)을 알아보는 데 쓴다. 없거나 형식이 틀리면 null. */
+function clientToken(req: IncomingMessage): string | null {
+  return sanitizeToken(req.headers[CLIENT_TOKEN_HEADER.toLowerCase()])
+}
+
+/** 쿼리의 cols/rows/w/h 검사. 방을 만들 때와 새 퍼즐을 시작할 때 같은 규칙을 쓴다. */
+function puzzleParams(url: URL) {
+  const cols = intParam(url, 'cols')
+  const rows = intParam(url, 'rows')
+  const w = intParam(url, 'w')
+  const h = intParam(url, 'h')
+  const gridOk =
+    cols >= MIN_GRID && cols <= MAX_GRID && rows >= MIN_GRID && rows <= MAX_GRID && cols * rows <= MAX_PIECES
+  const sizeOk = w >= 100 && w <= 4096 && h >= 100 && h <= 4096
+  return gridOk && sizeOk ? { cols, rows, imageWidth: w, imageHeight: h } : null
 }
 
 // ---------- API ----------
@@ -103,24 +120,47 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, url: URL) {
     const ip = req.socket.remoteAddress ?? 'unknown'
     if (!allowCreate(ip)) return json(res, 429, { error: '잠시 후 다시 시도해 주세요.' })
 
-    const cols = intParam(url, 'cols')
-    const rows = intParam(url, 'rows')
-    const w = intParam(url, 'w')
-    const h = intParam(url, 'h')
-    const gridOk =
-      cols >= MIN_GRID && cols <= MAX_GRID && rows >= MIN_GRID && rows <= MAX_GRID && cols * rows <= MAX_PIECES
-    const sizeOk = w >= 100 && w <= 4096 && h >= 100 && h <= 4096
-    if (!gridOk || !sizeOk) return json(res, 400, { error: '잘못된 퍼즐 설정이에요.' })
+    const params = puzzleParams(url)
+    if (!params) return json(res, 400, { error: '잘못된 퍼즐 설정이에요.' })
 
     const body = await readBody(req, MAX_IMAGE_BYTES)
     if (!body) return json(res, 413, { error: '이미지가 너무 커요. (최대 8MB)' })
     const mime = sniffImageMime(body)
     if (!mime) return json(res, 415, { error: 'JPG, PNG, WEBP 이미지만 올릴 수 있어요.' })
 
-    const room = rooms.create({ cols, rows, imageWidth: w, imageHeight: h, image: body, mime })
+    // 방을 만든 브라우저가 방장이 된다. (식별값이 없는 예전 화면에서 만들면 방장은 가장 먼저 들어온 사람)
+    const room = rooms.create({ ...params, image: body, mime, ownerToken: clientToken(req) })
     if (!room) return json(res, 503, { error: '지금은 방을 더 만들 수 없어요.' })
     const out: CreateRoomResponse = { roomId: room.id }
     return json(res, 201, out)
+  }
+
+  // POST /api/rooms/:id/restart?cols=&rows=&w=&h=   (body: 새 이미지 바이트, 헤더: 방장의 X-Client-Token)
+  // 퍼즐을 완성한 뒤에 방장만 새 사진으로 같은 방에서 다시 시작할 수 있다.
+  if (req.method === 'POST' && parts.length === 4 && parts[1] === 'rooms' && parts[3] === 'restart') {
+    const room = rooms.get(parts[2])
+    if (!room) return json(res, 404, { error: '방을 찾을 수 없어요.' })
+
+    const ip = req.socket.remoteAddress ?? 'unknown'
+    if (!allowCreate(ip)) return json(res, 429, { error: '잠시 후 다시 시도해 주세요.' })
+
+    const token = clientToken(req)
+    if (!token || !room.isHostToken(token)) return json(res, 403, { error: '방장만 새 퍼즐을 시작할 수 있어요.' })
+    if (!room.solved) return json(res, 409, { error: '퍼즐을 완성한 뒤에 새로 시작할 수 있어요.' })
+
+    const params = puzzleParams(url)
+    if (!params) return json(res, 400, { error: '잘못된 퍼즐 설정이에요.' })
+
+    const body = await readBody(req, MAX_IMAGE_BYTES)
+    if (!body) return json(res, 413, { error: '이미지가 너무 커요. (최대 8MB)' })
+    const mime = sniffImageMime(body)
+    if (!mime) return json(res, 415, { error: 'JPG, PNG, WEBP 이미지만 올릴 수 있어요.' })
+
+    // 업로드하는 사이에 다른 요청이 먼저 시작했을 수 있으므로, 완성 여부는 restart()가 마지막으로 다시 확인한다.
+    if (!room.restart({ ...params, image: body, mime })) {
+      return json(res, 409, { error: '퍼즐을 완성한 뒤에 새로 시작할 수 있어요.' })
+    }
+    return json(res, 200, { ok: true })
   }
 
   // GET /api/rooms/:id

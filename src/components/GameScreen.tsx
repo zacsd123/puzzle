@@ -3,6 +3,7 @@ import { Link } from 'react-router-dom'
 import { BoardView } from '../game/BoardView'
 import type { GameClient } from '../game/GameClient'
 import CursorChat from './CursorChat'
+import RestartDialog from './RestartDialog'
 
 function copyText(text: string): boolean {
   // https/localhost에서는 clipboard API, 같은 와이파이(http)에서는 구형 방식으로 대체
@@ -33,6 +34,17 @@ export default function GameScreen({ client, roomId }: { client: GameClient; roo
   const [ghost, setGhost] = useState(false)
   const [copied, setCopied] = useState(false)
   const [resultDismissed, setResultDismissed] = useState(false)
+  const [restartOpen, setRestartOpen] = useState(false)
+
+  const isHost = snap.meId !== null && snap.hostId === snap.meId
+  const host = snap.players.find((p) => p.id === snap.hostId)
+
+  // 새 퍼즐이 시작돼서(완성 상태가 풀려서) 다음에 또 완성하면 결과 창이 다시 뜨도록 되돌린다.
+  // 방장이 바뀌어 내가 더는 방장이 아니면 "새 사진 고르기" 창도 닫는다.
+  useEffect(() => {
+    if (!snap.solved) setResultDismissed(false)
+    if (!snap.solved || !isHost) setRestartOpen(false)
+  }, [snap.solved, isHost])
 
   useEffect(() => {
     const view = new BoardView(canvasRef.current!, client)
@@ -106,6 +118,7 @@ export default function GameScreen({ client, roomId }: { client: GameClient; roo
               <span className="player-name">
                 {p.name}
                 {p.id === snap.meId && <em className="me-badge">나</em>}
+                {p.id === snap.hostId && <em className="me-badge host-badge">방장</em>}
               </span>
               <span className="player-score">{p.placed}</span>
             </li>
@@ -127,6 +140,11 @@ export default function GameScreen({ client, roomId }: { client: GameClient; roo
         <button className={`btn small${ghost ? ' active' : ''}`} onClick={() => setGhost((g) => !g)}>
           원본 힌트 {ghost ? '끄기' : '보기'}
         </button>
+        {snap.solved && isHost && (
+          <button className="btn small primary" onClick={() => setRestartOpen(true)}>
+            새 사진으로 다시 하기
+          </button>
+        )}
         <span className="hint">
           맞는 조각끼리 가까이 두면 붙어요 · 빈 곳 드래그로 이동 · 휠로 확대/축소 · <kbd>/</kbd> 키로 채팅
         </span>
@@ -177,8 +195,20 @@ export default function GameScreen({ client, roomId }: { client: GameClient; roo
                 </li>
               ))}
             </ol>
-            <div className="modal-actions">
-              <button className="btn primary" onClick={() => setResultDismissed(true)}>
+            {isHost ? (
+              <p className="muted">방장이에요. 새 사진을 골라 같은 방에서 다시 시작할 수 있어요.</p>
+            ) : (
+              <p className="muted">
+                {host ? `방장 ${host.name}님이` : '방장이'} 새 사진을 고르면 새 퍼즐이 시작돼요.
+              </p>
+            )}
+            <div className={`modal-actions${isHost ? ' wrap' : ''}`}>
+              {isHost && (
+                <button className="btn primary" onClick={() => setRestartOpen(true)}>
+                  새 사진으로 다시 하기
+                </button>
+              )}
+              <button className={`btn${isHost ? '' : ' primary'}`} onClick={() => setResultDismissed(true)}>
                 완성본 보기
               </button>
               <Link to="/" className="btn">
@@ -187,6 +217,11 @@ export default function GameScreen({ client, roomId }: { client: GameClient; roo
             </div>
           </div>
         </div>
+      )}
+
+      {restartOpen && isHost && snap.solved && (
+        // 요청이 성공하면 서버가 새 퍼즐을 보내 완성 상태가 풀리고, 위의 effect가 이 창을 닫는다.
+        <RestartDialog roomId={roomId} onClose={() => setRestartOpen(false)} />
       )}
     </div>
   )

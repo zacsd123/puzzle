@@ -44,6 +44,8 @@ export class BoardView {
   /** 사용자가 직접 줌/이동했는지. 아니라면 창 크기가 바뀔 때 자동으로 전체 보기에 맞춘다. */
   private userMoved = false
   private drag: Drag | null = null
+  /** 마지막으로 그린 퍼즐의 이미지/조각 그림. 바뀌면 새 퍼즐이 시작된 것이다. */
+  private lastAssets: object | null = null
   private raf = 0
   private lastTime = 0
   private ro: ResizeObserver
@@ -258,6 +260,12 @@ export class BoardView {
     const puzzle = this.client.puzzle
     const assets = this.client.assets
     if (!puzzle || !assets || this.width === 0) return
+    // 새 퍼즐(사진/격자가 다름)이 시작되면 처음 들어왔을 때처럼 전체가 한눈에 보이게 다시 맞춘다.
+    if (assets !== this.lastAssets) {
+      this.lastAssets = assets
+      this.fitted = false
+      this.drag = null
+    }
     if (!this.fitted) this.fit()
 
     const { scale, ox, oy } = this.cam

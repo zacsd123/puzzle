@@ -8,6 +8,10 @@ export const MAX_IMAGE_BYTES = 8 * 1024 * 1024
 export const MIN_GRID = 2
 export const MAX_GRID = 60 // 가로로 아주 긴 사진도 1000조각까지 나눌 수 있도록 넉넉하게
 export const MAX_PIECES = 1000
+/** 브라우저/탭 식별값이 따라야 하는 형식 (서버·화면 공용) */
+export const CLIENT_TOKEN_PATTERN = /^[A-Za-z0-9_-]{16,64}$/
+/** 방을 만들거나 새 퍼즐을 시작할 때 "나는 방장이다"를 밝히는 요청 헤더 */
+export const CLIENT_TOKEN_HEADER = 'X-Client-Token'
 /** 커서 채팅 한 번에 쓸 수 있는 최대 글자 수 */
 export const MAX_CHAT_LENGTH = 30
 export const ROOM_CODE_LENGTH = 5
@@ -34,6 +38,7 @@ export interface PuzzleConfig {
   seed: number
   /** 조각이 돌아다닐 수 있는 테이블 범위 (보드를 포함) */
   bounds: Bounds
+  /** 새 퍼즐로 바뀔 때마다 주소 끝의 ?v= 값이 달라져서 브라우저가 이전 사진을 재사용하지 않는다. */
   imageUrl: string
 }
 
@@ -95,13 +100,18 @@ export type ClientMessage =
 // ---------- 서버 → 클라이언트 ----------
 export type ServerMessage =
   | {
+      /** 입장했을 때, 그리고 방장이 새 퍼즐을 시작했을 때(모두에게 새로) 온다. */
       t: 'welcome'
       you: string
       puzzle: PuzzleConfig
       pieces: PieceState[]
       players: PlayerInfo[]
       solved: boolean
+      /** 방장 플레이어 id */
+      host: string | null
     }
+  /** 방장이 바뀌었다. (방장이 나가거나 다시 들어온 경우) */
+  | { t: 'host'; id: string | null }
   | { t: 'player_join'; player: PlayerInfo }
   | { t: 'player_leave'; id: string }
   | { t: 'cursor'; id: string; x: number; y: number }
