@@ -3,6 +3,7 @@ import type { DragEvent, FormEvent } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
 import { MAX_NAME_LENGTH, computeGrid } from '../../shared/protocol'
 import type { CreateRoomResponse } from '../../shared/protocol'
+import { apiUrl } from '../lib/config'
 import { readImageSize, resizeImage } from '../lib/image'
 import { loadName, saveName } from '../lib/storage'
 
@@ -79,7 +80,7 @@ export default function Create() {
     try {
       const { blob, width, height } = await resizeImage(picked.file)
       const { cols, rows } = computeGrid(count, width, height)
-      const res = await fetch(`/api/rooms?cols=${cols}&rows=${rows}&w=${width}&h=${height}`, {
+      const res = await fetch(apiUrl(`/api/rooms?cols=${cols}&rows=${rows}&w=${width}&h=${height}`), {
         method: 'POST',
         headers: { 'Content-Type': blob.type },
         body: blob,

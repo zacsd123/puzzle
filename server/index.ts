@@ -13,6 +13,8 @@ import type { Room } from './rooms'
 
 // 호스팅 환경이 PORT를 주는 경우를 지원하되, PUZZLE_PORT가 있으면 그것을 우선한다.
 const PORT = Number(process.env.PUZZLE_PORT ?? process.env.PORT ?? 3001)
+// 프론트를 다른 도메인에 분리 배포할 때, 그 도메인을 여기 지정한다. (쉼표로 여러 개, 기본은 전체 허용)
+const ALLOWED_ORIGIN = process.env.ALLOWED_ORIGIN ?? '*'
 const DEV_CLIENT_PORT = 5199 // vite.config.ts의 개발용 화면 포트
 const IS_PROD = process.env.NODE_ENV === 'production'
 const DIST_DIR = fileURLToPath(new URL('../dist', import.meta.url))
@@ -81,6 +83,15 @@ function allowCreate(ip: string): boolean {
 function intParam(url: URL, key: string): number {
   const n = Number(url.searchParams.get(key))
   return Number.isInteger(n) ? n : NaN
+}
+
+function setCors(req: IncomingMessage, res: ServerResponse) {
+  const allowed = ALLOWED_ORIGIN.split(',').map((s) => s.trim())
+  const origin = req.headers.origin
+  res.setHeader('Access-Control-Allow-Origin', ALLOWED_ORIGIN === '*' ? '*' : origin && allowed.includes(origin) ? origin : allowed[0])
+  res.setHeader('Vary', 'Origin')
+  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS')
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type')
 }
 
 // ---------- API ----------
@@ -188,7 +199,15 @@ function serveStatic(req: IncomingMessage, res: ServerResponse, url: URL) {
 // ---------- HTTP 서버 ----------
 const server = createServer((req, res) => {
   const url = new URL(req.url ?? '/', 'http://localhost')
-  if (url.pathname.startsWith('/api/')) {
+  if (url.pathname === '/healthz') {
+    res.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8' })
+    res.end('ok')
+  } else if (url.pathname.startsWith('/api/')) {
+    setCors(req, res)
+    if (req.method === 'OPTIONS') {
+      res.writeHead(204).end()
+      return
+    }
     handleApi(req, res, url).catch((err) => {
       console.error(err)
       if (!res.headersSent) json(res, 500, { error: '서버 오류' })

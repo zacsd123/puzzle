@@ -5,6 +5,7 @@ import type {
   PuzzleConfig,
   ServerMessage,
 } from '../../shared/protocol'
+import { apiUrl, wsUrl } from '../lib/config'
 import { buildGeometry, renderPieceBitmaps } from './jigsaw'
 import type { PieceGeometry } from './jigsaw'
 
@@ -196,8 +197,7 @@ export class GameClient {
   // ---------- 연결 ----------
   private connect() {
     if (this.destroyed) return
-    const proto = location.protocol === 'https:' ? 'wss' : 'ws'
-    const ws = new WebSocket(`${proto}://${location.host}/ws`)
+    const ws = new WebSocket(wsUrl('/ws'))
     this.ws = ws
 
     ws.onopen = () => {
@@ -358,7 +358,7 @@ export class GameClient {
     this.assetsKey = key
     try {
       const image = new Image()
-      image.src = puzzle.imageUrl
+      image.src = apiUrl(puzzle.imageUrl)
       await image.decode()
       if (this.destroyed || this.assetsKey !== key) return
       const geo = buildGeometry(puzzle)

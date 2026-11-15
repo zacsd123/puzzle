@@ -1,0 +1,13 @@
+services:
+  - type: web
+    name: puzzle-party-server
+    runtime: node
+    plan: free
+    buildCommand: npm ci
+    startCommand: npm start
+    healthCheckPath: /healthz
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: ALLOWED_ORIGIN
+        value: "*" # Vercel 프론트 주소 생기면 https://your-app.vercel.app 로 바꾸기
