@@ -1,3 +1,4 @@
+import { chatOpacity } from './chat'
 import type { GameClient } from './GameClient'
 import { SIDES } from './jigsaw'
 
@@ -380,11 +381,26 @@ export class BoardView {
     for (const pl of players.values()) {
       if (pl.info.id === this.client.meId || !pl.hasCursor) continue
       const idle = now - pl.lastSeen > 6000
-      this.drawCursor(pl.x * scale + ox, pl.y * scale + oy, pl.info.name, pl.info.color, idle ? 0.35 : 1)
+
+      // 커서 옆 채팅은 마지막으로 글이 바뀐 뒤 시간이 지나면 흐려지다가 사라진다.
+      let chat: { text: string; alpha: number } | null = null
+      if (pl.chat) {
+        const alpha = chatOpacity(now - pl.chat.at)
+        if (alpha > 0) chat = { text: pl.chat.text, alpha }
+        else pl.chat = null
+      }
+      this.drawCursor(pl.x * scale + ox, pl.y * scale + oy, pl.info.name, pl.info.color, idle ? 0.35 : 1, chat)
     }
   }
 
-  private drawCursor(x: number, y: number, name: string, color: string, alpha: number) {
+  private drawCursor(
+    x: number,
+    y: number,
+    name: string,
+    color: string,
+    alpha: number,
+    chat: { text: string; alpha: number } | null,
+  ) {
     const { ctx } = this
     ctx.save()
     ctx.globalAlpha = alpha
@@ -414,6 +430,23 @@ export class BoardView {
     ctx.fillStyle = '#fff'
     ctx.textBaseline = 'middle'
     ctx.fillText(name, 18, 29.5)
+
+    if (chat) {
+      // 이름표 아래에 말풍선. 화면 오른쪽 끝에 닿으면 왼쪽으로 밀어서 잘리지 않게 한다.
+      ctx.font = '600 13px system-ui, -apple-system, "Segoe UI", "Malgun Gothic", sans-serif'
+      const bw = Math.max(40, ctx.measureText(chat.text).width + 26)
+      const bx = Math.min(11, this.width - 8 - x - bw)
+      ctx.globalAlpha = alpha * chat.alpha
+      ctx.beginPath()
+      ctx.roundRect(bx, 44, bw, 28, 14)
+      ctx.fillStyle = color
+      ctx.fill()
+      ctx.lineWidth = 1.5
+      ctx.strokeStyle = 'rgba(255,255,255,0.85)'
+      ctx.stroke()
+      ctx.fillStyle = '#fff'
+      ctx.fillText(chat.text, bx + 13, 58.5)
+    }
     ctx.restore()
   }
 }

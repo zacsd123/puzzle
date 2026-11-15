@@ -8,6 +8,8 @@ export const MAX_IMAGE_BYTES = 8 * 1024 * 1024
 export const MIN_GRID = 2
 export const MAX_GRID = 60 // 가로로 아주 긴 사진도 1000조각까지 나눌 수 있도록 넉넉하게
 export const MAX_PIECES = 1000
+/** 커서 채팅 한 번에 쓸 수 있는 최대 글자 수 */
+export const MAX_CHAT_LENGTH = 30
 export const ROOM_CODE_LENGTH = 5
 export const ROOM_CODE_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'
 
@@ -68,14 +70,24 @@ export interface PlayerInfo {
   id: string
   name: string
   color: string
-  /** 이 플레이어가 만든 연결 수 (조각끼리 붙이기 + 퍼즐판에 맞추기) */
+  /** 이 플레이어가 조각을 붙인 횟수 (조각끼리 붙이기 / 퍼즐판에 맞추기, 한 번 내려놓아 붙으면 1) */
   placed: number
 }
 
 // ---------- 클라이언트 → 서버 ----------
 export type ClientMessage =
-  | { t: 'join'; roomId: string; name: string }
+  | {
+      t: 'join'
+      roomId: string
+      name: string
+      /** 이 브라우저를 알아보는 값. 나갔다 다시 들어와도 같은 사람으로 보고 기록을 이어 준다. */
+      token?: string
+      /** 이 화면(탭) 하나를 알아보는 값. 같은 탭이 재접속하는 것과 다른 탭을 구분한다. */
+      session?: string
+    }
   | { t: 'cursor'; x: number; y: number }
+  /** 커서 옆에 띄울 글. 입력 중인 글 전체를 보내고, 빈 문자열이면 지운다. */
+  | { t: 'chat'; text: string }
   | { t: 'grab'; piece: number }
   | { t: 'move'; piece: number; x: number; y: number }
   | { t: 'drop'; piece: number; x: number; y: number }
@@ -93,6 +105,7 @@ export type ServerMessage =
   | { t: 'player_join'; player: PlayerInfo }
   | { t: 'player_leave'; id: string }
   | { t: 'cursor'; id: string; x: number; y: number }
+  | { t: 'chat'; id: string; text: string }
   | { t: 'grab'; piece: number; by: string; z: number }
   | { t: 'grab_denied'; piece: number; x: number; y: number; locked: boolean }
   | { t: 'move'; piece: number; x: number; y: number }
@@ -101,7 +114,7 @@ export type ServerMessage =
       by: string
       /** 'board' = 퍼즐판 정답 자리에 붙음, 'piece' = 다른 덩어리와 붙음, null = 그냥 내려놓음 */
       snap: 'board' | 'piece' | null
-      /** 이번 드롭으로 by가 얻은 연결 수 */
+      /** 이번 드롭으로 by가 얻은 연결 수. 붙었으면 1, 아니면 0 (한 번에 여러 개가 붙어도 1) */
       gained: number
       /** 이번 드롭으로 상태가 바뀐 모든 조각 (내려놓은 덩어리 + 합쳐진 덩어리) */
       pieces: PieceUpdate[]

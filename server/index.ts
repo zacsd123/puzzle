@@ -279,7 +279,7 @@ wss.on('connection', (rawWs) => {
         ws.close(4004, 'room not found')
         return
       }
-      const joined = target.join(ws, m.name)
+      const joined = target.join(ws, m.name, m.token, m.session)
       if (!joined) {
         ws.close(4003, 'join rejected')
         return

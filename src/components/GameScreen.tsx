@@ -2,6 +2,7 @@ import { useEffect, useRef, useState, useSyncExternalStore } from 'react'
 import { Link } from 'react-router-dom'
 import { BoardView } from '../game/BoardView'
 import type { GameClient } from '../game/GameClient'
+import CursorChat from './CursorChat'
 
 function copyText(text: string): boolean {
   // https/localhost에서는 clipboard API, 같은 와이파이(http)에서는 구형 방식으로 대체
@@ -65,6 +66,12 @@ export default function GameScreen({ client, roomId }: { client: GameClient; roo
     <div className="game">
       <canvas ref={canvasRef} className="game-canvas" />
 
+      <CursorChat
+        client={client}
+        enabled={snap.status === 'ready'}
+        color={snap.players.find((p) => p.id === snap.meId)?.color}
+      />
+
       {/* 왼쪽 위: 방 정보 + 진행도 */}
       <section className="hud hud-top-left">
         <div className="hud-row">
@@ -120,7 +127,9 @@ export default function GameScreen({ client, roomId }: { client: GameClient; roo
         <button className={`btn small${ghost ? ' active' : ''}`} onClick={() => setGhost((g) => !g)}>
           원본 힌트 {ghost ? '끄기' : '보기'}
         </button>
-        <span className="hint">맞는 조각끼리 가까이 두면 붙어요 · 빈 곳 드래그로 이동 · 휠로 확대/축소</span>
+        <span className="hint">
+          맞는 조각끼리 가까이 두면 붙어요 · 빈 곳 드래그로 이동 · 휠로 확대/축소 · <kbd>/</kbd> 키로 채팅
+        </span>
       </section>
 
       {snap.status === 'reconnecting' && (

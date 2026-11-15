@@ -1,6 +1,7 @@
 import { randomBytes, randomInt } from 'node:crypto'
 import type { WebSocket } from 'ws'
 import {
+  MAX_CHAT_LENGTH,
   MAX_NAME_LENGTH,
   ROOM_CODE_ALPHABET,
   ROOM_CODE_LENGTH,
@@ -20,6 +21,9 @@ import type {
 const MAX_PLAYERS = 20
 const MAX_ROOMS = 100
 const EMPTY_ROOM_TTL_MS = 6 * 60 * 60 * 1000
+/** 방마다 기억해 둘 "나간 사람" 기록 수. 이보다 많아지면 가장 오래된 것부터 잊는다. */
+const MAX_RECORDS = 200
+const TOKEN_PATTERN = /^[A-Za-z0-9_-]{16,64}$/
 
 const PLAYER_COLORS = [
   '#ef4444',
@@ -41,10 +45,34 @@ interface Player {
   ws: WebSocket
   /** 지금 들고 있는 덩어리 번호 (없으면 null) */
   holding: number | null
+  /** 나갈 때 기록을 남기는 데 쓰는 브라우저 식별값. 없으면(또는 다른 탭이 이미 쓰는 중이면) 기록을 남기지 않는다. */
+  token: string | null
+  /** 이 화면(탭)의 식별값. 같은 탭이 재접속한 것인지 알아보는 데 쓴다. */
+  session: string
+}
+
+/** 나간 사람이 다시 들어왔을 때 되돌려 줄 기록 */
+interface PlayerRecord {
+  placed: number
+  color: string
 }
 
 function isNum(v: unknown): v is number {
   return typeof v === 'number' && Number.isFinite(v)
+}
+
+function sanitizeToken(raw: unknown): string | null {
+  return typeof raw === 'string' && TOKEN_PATTERN.test(raw) ? raw : null
+}
+
+/** 입력 도중의 글이므로 끝의 공백은 남기고, 제어문자/줄바꿈만 정리해서 MAX_CHAT_LENGTH자로 자른다. */
+function sanitizeChat(raw: unknown): string {
+  if (typeof raw !== 'string') return ''
+  const clean = raw
+    .replace(/[\u0000-\u001f\u007f]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .replace(/^ /, '')
+  return Array.from(clean).slice(0, MAX_CHAT_LENGTH).join('')
 }
 
 function sanitizeName(raw: unknown): string {
@@ -72,6 +100,10 @@ export class Room {
   private readonly ph: number
   private pieces: PieceState[]
   private players = new Map<string, Player>()
+  /** 지금 접속 중인 사람들의 token → 플레이어 */
+  private byToken = new Map<string, Player>()
+  /** 나간 사람들의 token → 기록. 다시 들어오면 이어서 쓴다. */
+  private records = new Map<string, PlayerRecord>()
   private zCounter = 0
 
   constructor(opts: {
@@ -222,34 +254,67 @@ export class Room {
     return base
   }
 
-  private pickColor(): string {
+  /** preferred가 아직 아무도 안 쓰는 색이면 그 색을, 아니면 안 쓰는 색 중 하나를 고른다. */
+  private pickColor(preferred?: string): string {
     const used = new Set([...this.players.values()].map((p) => p.info.color))
+    if (preferred && !used.has(preferred)) return preferred
     const free = PLAYER_COLORS.filter((c) => !used.has(c))
     const pool = free.length > 0 ? free : PLAYER_COLORS
     return pool[randomInt(pool.length)]
   }
 
-  join(ws: WebSocket, rawName: unknown): Player | null {
+  private saveRecord(token: string, player: Player) {
+    this.records.delete(token) // 다시 넣어서 "가장 최근" 순서로 만든다.
+    this.records.set(token, { placed: player.info.placed, color: player.info.color })
+    if (this.records.size > MAX_RECORDS) {
+      const oldest = this.records.keys().next().value
+      if (oldest !== undefined) this.records.delete(oldest)
+    }
+  }
+
+  join(ws: WebSocket, rawName: unknown, rawToken?: unknown, rawSession?: unknown): Player | null {
     const name = sanitizeName(rawName)
     if (!name) {
       send(ws, { t: 'error', message: '이름을 입력해 주세요.' })
       return null
     }
+
+    let token = sanitizeToken(rawToken)
+    const session = typeof rawSession === 'string' ? rawSession.slice(0, 64) : ''
+    const active = token ? this.byToken.get(token) : undefined
+    if (token && active) {
+      if (session && active.session === session) {
+        // 같은 화면이 다시 접속했다. (새로고침, 네트워크가 잠깐 끊겼다 돌아온 경우 등)
+        // 서버가 아직 끊긴 줄 모르는 이전 연결을 먼저 정리하고, 그 기록을 이어받는다.
+        this.leave(active)
+        send(active.ws, { t: 'error', message: '다른 화면에서 같은 방에 접속해서 이 화면의 연결이 종료됐어요.' })
+        active.ws.close(4005, 'replaced')
+        setTimeout(() => active.ws.terminate(), 2000).unref() // 응답 없는 연결이 남지 않도록
+      } else {
+        // 같은 브라우저의 다른 탭이다. 기록은 먼저 들어온 쪽이 쓰고, 이쪽은 따로 참가한다.
+        token = null
+      }
+    }
+
     if (this.players.size >= MAX_PLAYERS) {
       send(ws, { t: 'error', message: '방이 가득 찼어요.' })
       return null
     }
+    const record = token ? this.records.get(token) : undefined
     const player: Player = {
       info: {
         id: randomBytes(6).toString('hex'),
         name: this.uniqueName(name),
-        color: this.pickColor(),
-        placed: 0,
+        color: this.pickColor(record?.color),
+        placed: record?.placed ?? 0,
       },
       ws,
       holding: null,
+      token,
+      session,
     }
     this.players.set(player.info.id, player)
+    if (token) this.byToken.set(token, player)
     this.lastActive = Date.now()
 
     send(ws, {
@@ -268,6 +333,10 @@ export class Room {
     if (!this.players.has(player.info.id)) return
     if (player.holding !== null) this.release(player, player.holding)
     this.players.delete(player.info.id)
+    if (player.token && this.byToken.get(player.token) === player) {
+      this.byToken.delete(player.token)
+      this.saveRecord(player.token, player) // release()로 얻은 점수까지 포함해서 남긴다.
+    }
     this.lastActive = Date.now()
     this.broadcast({ t: 'player_leave', id: player.info.id })
   }
@@ -275,6 +344,8 @@ export class Room {
   // ---------- 메시지 처리 ----------
   handle(player: Player, msg: unknown) {
     if (typeof msg !== 'object' || msg === null) return
+    // 이미 정리된(나갔거나 새 접속에 자리를 내준) 연결이 늦게 보낸 메시지는 무시한다.
+    if (this.players.get(player.info.id) !== player) return
     const m = msg as Record<string, unknown>
     this.lastActive = Date.now()
 
@@ -283,6 +354,9 @@ export class Room {
         if (isNum(m.x) && isNum(m.y)) {
           this.broadcast({ t: 'cursor', id: player.info.id, x: m.x, y: m.y }, player.info.id)
         }
+        break
+      case 'chat':
+        this.broadcast({ t: 'chat', id: player.info.id, text: sanitizeChat(m.text) }, player.info.id)
         break
       case 'grab':
         if (isNum(m.piece)) this.grab(player, m.piece)
@@ -370,7 +444,6 @@ export class Room {
     let members = this.members(groupId)
     const touched = new Set(members.map((m) => m.id))
     let snap: 'board' | 'piece' | null = null
-    let gained = 0
 
     // 1) 퍼즐판 정답 자리
     const off0 = this.offsetOf(members[0])
@@ -378,7 +451,6 @@ export class Room {
       this.setOffset(members, 0, 0)
       for (const m of members) m.locked = true
       snap = 'board'
-      gained++
     }
 
     // 2) 이웃 덩어리와 합치기 (합칠 때마다 다시 처음부터 검사)
@@ -412,7 +484,6 @@ export class Room {
             touched.add(p.id)
           }
           groupId = newGroup
-          gained++
           snap ??= 'piece'
           merged = true
           break outer
@@ -428,7 +499,9 @@ export class Room {
       snap = 'board'
     }
 
-    return { touched, snap, gained }
+    // 점수는 "붙인 횟수"다. 한 번 내려놓아서 판에 맞춰지면서 이웃과도 붙었거나, 한꺼번에 여러 덩어리가
+    // 붙었더라도 찰칵 한 번이므로 1점만 준다. (예전에는 판 고정과 이웃 연결을 따로 세서 2점씩 올랐다.)
+    return { touched, snap, gained: snap ? 1 : 0 }
   }
 }
 

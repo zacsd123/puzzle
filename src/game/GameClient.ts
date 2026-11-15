@@ -6,6 +6,7 @@ import type {
   ServerMessage,
 } from '../../shared/protocol'
 import { apiUrl, wsUrl } from '../lib/config'
+import { loadClientId, loadTabId } from '../lib/storage'
 import { buildGeometry, renderPieceBitmaps } from './jigsaw'
 import type { PieceGeometry } from './jigsaw'
 
@@ -23,6 +24,8 @@ export interface ClientPlayer {
   ty: number
   hasCursor: boolean
   lastSeen: number
+  /** 커서 옆에 떠 있는 채팅 글. at은 마지막으로 글이 바뀐 시각(performance.now) */
+  chat: { text: string; at: number } | null
 }
 
 export interface PuzzleAssets {
@@ -84,6 +87,9 @@ export class GameClient {
   private retry = 0
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null
   private assetsKey = ''
+  /** 이 브라우저의 식별값(저장됨)과 이 탭의 식별값(탭마다 다르고 새로고침해도 유지) */
+  private readonly token = loadClientId()
+  private readonly session = loadTabId()
   private maxZ = 0
   private groupMap = new Map<number, ClientPiece[]>()
 
@@ -201,7 +207,7 @@ export class GameClient {
     this.ws = ws
 
     ws.onopen = () => {
-      this.send({ t: 'join', roomId: this.roomId, name: this.name })
+      this.send({ t: 'join', roomId: this.roomId, name: this.name, token: this.token, session: this.session })
     }
     ws.onmessage = (ev) => {
       if (typeof ev.data !== 'string') return
@@ -215,7 +221,8 @@ export class GameClient {
       if (this.destroyed || this.ws !== ws) return
       this.ws = null
       this.myHeld = null
-      const fatal = ev.code === 4003 || ev.code === 4004 || this.error !== null
+      // 4003 입장 거절, 4004 방 없음, 4005 같은 탭이 다른 연결로 대체됨 → 다시 연결을 시도하지 않는다.
+      const fatal = ev.code === 4003 || ev.code === 4004 || ev.code === 4005 || this.error !== null
       if (fatal || this.retry >= MAX_RETRIES) {
         if (!this.error) this.error = '서버와 연결이 끊어졌어요.'
         this.setStatus('closed')
@@ -279,6 +286,14 @@ export class GameClient {
           p.y = msg.y
           p.hasCursor = true
         }
+        break
+      }
+      case 'chat': {
+        const p = this.players.get(msg.id)
+        if (!p) break
+        const now = performance.now()
+        p.chat = msg.text ? { text: msg.text, at: now } : null
+        if (msg.text) p.lastSeen = now // 글을 쓰는 중이면 커서가 흐려지지 않게
         break
       }
       case 'grab': {
@@ -345,7 +360,7 @@ export class GameClient {
   }
 
   private newPlayer(info: PlayerInfo): ClientPlayer {
-    return { info, x: 0, y: 0, tx: 0, ty: 0, hasCursor: false, lastSeen: 0 }
+    return { info, x: 0, y: 0, tx: 0, ty: 0, hasCursor: false, lastSeen: 0, chat: null }
   }
 
   private assetKeyFor(p: PuzzleConfig) {
@@ -377,6 +392,11 @@ export class GameClient {
   sendCursor(x: number, y: number) {
     this.pendingCursor = { x, y }
     this.schedule()
+  }
+
+  /** 커서 옆에 띄울 글을 보낸다. 입력 중인 글 전체를 보내고, 빈 문자열이면 다른 사람 화면에서 지워진다. */
+  sendChat(text: string) {
+    this.send({ t: 'chat', text })
   }
 
   /** 조각(이 붙어 있는 덩어리 전체) 잡기를 시도한다. 화면에서는 바로 들어 올리고, 서버가 거부하면 되돌린다. */

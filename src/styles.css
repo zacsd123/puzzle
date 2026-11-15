@@ -602,6 +602,74 @@ input:focus {
   color: var(--muted);
 }
 
+.hint kbd {
+  padding: 1px 6px;
+  font: inherit;
+  font-weight: 700;
+  color: var(--text);
+  background: rgba(255, 255, 255, 0.1);
+  border: 1px solid var(--border);
+  border-radius: 5px;
+}
+
+/* 커서 채팅: "/"를 누르면 내 커서 옆에 뜨는 입력창 (위치/투명도는 CursorChat이 프레임마다 직접 갱신) */
+.cursor-chat {
+  position: absolute;
+  left: 0;
+  top: 0;
+  z-index: 30;
+  pointer-events: none;
+  will-change: transform, opacity;
+}
+
+.cursor-chat-pill {
+  display: inline-grid;
+  min-width: 40px;
+  max-width: min(520px, calc(100vw - 16px));
+  padding: 5px 13px;
+  border-radius: 15px;
+  background: var(--chat-color);
+  box-shadow:
+    0 6px 18px rgba(0, 0, 0, 0.35),
+    0 0 0 1.5px rgba(255, 255, 255, 0.85);
+}
+
+/* 입력창이 글자 수만큼 늘어나도록, 같은 칸에 보이지 않는 복사본을 겹쳐 폭을 재게 한다. */
+.cursor-chat-pill::after,
+.cursor-chat .cursor-chat-input {
+  grid-area: 1 / 1;
+  font:
+    600 13px/1.5 system-ui,
+    -apple-system,
+    'Segoe UI',
+    'Malgun Gothic',
+    sans-serif;
+}
+
+.cursor-chat-pill::after {
+  content: attr(data-value) ' ';
+  visibility: hidden;
+  white-space: pre;
+}
+
+.cursor-chat .cursor-chat-input {
+  width: 100%;
+  min-width: 0;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  outline: none;
+  background: transparent;
+  color: #fff;
+  caret-color: #fff;
+  user-select: text;
+  -webkit-user-select: text;
+}
+
+.cursor-chat .cursor-chat-input::placeholder {
+  color: rgba(255, 255, 255, 0.65);
+}
+
 @media (max-width: 900px) {
   .hint {
     display: none;
