@@ -4,6 +4,15 @@ import { SIDES } from './jigsaw'
 /** 조각이 붙을 때 반짝이는 시간(ms) */
 const FLASH_MS = 550
 
+// ---- 조각이 많을 때의 렌더링 비용 조절 ----
+// (측정: 1000조각을 절반 이하로 줄여 그리면 고화질 보간은 프레임당 300ms+, 낮은 화질 보간은 20ms 안팎)
+/** 이 수보다 조각이 많고 많이 축소해서 보는 중이면 가벼운 보간으로 그린다. */
+const HEAVY_PIECE_COUNT = 150
+/** 실제 화면 배율(줌 × 화면 배율)이 이보다 작으면 브라우저가 느린 축소 보간 경로를 탄다. */
+const DOWNSCALE_SLOW_BELOW = 0.5
+/** 들고 있는 덩어리의 그림자는 조각마다 흐림 효과를 따로 계산해서, 큰 덩어리는 그림자를 생략한다. */
+const SHADOW_MAX_PIECES = 60
+
 interface Camera {
   scale: number
   ox: number
@@ -290,6 +299,10 @@ export class BoardView {
     ctx.strokeStyle = '#4b5a82'
     ctx.strokeRect(0, 0, W, H)
 
+    // 조각 그리기용 보간 화질. 판 배경/원본 힌트는 위에서 고화질로 이미 그렸다.
+    ctx.imageSmoothingQuality =
+      pieces.length > HEAVY_PIECE_COUNT && dpr * scale < DOWNSCALE_SLOW_BELOW ? 'low' : 'high'
+
     // 맞춰진 조각 (맨 아래)
     for (const p of pieces) {
       if (p.locked) ctx.drawImage(bitmaps[p.id], p.x - geo.pad, p.y - geo.pad)
@@ -307,7 +320,7 @@ export class BoardView {
       i = j
 
       const holder = run[0].heldBy ? players.get(run[0].heldBy) : undefined
-      if (run[0].heldBy) {
+      if (run[0].heldBy && run.length <= SHADOW_MAX_PIECES) {
         // 그림자는 덩어리 전체에 대해 먼저 따로 그린다. (조각 사이 이음새에 그림자가 비쳐 보이지 않게)
         ctx.save()
         ctx.shadowColor = 'rgba(0,0,0,0.55)'

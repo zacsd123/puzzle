@@ -1,19 +1,33 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import type { DragEvent, FormEvent } from 'react'
+import type { CSSProperties, DragEvent, FormEvent } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
-import { MAX_NAME_LENGTH, computeGrid } from '../../shared/protocol'
+import { MAX_NAME_LENGTH, MAX_PIECES, computeGrid } from '../../shared/protocol'
 import type { CreateRoomResponse } from '../../shared/protocol'
 import { apiUrl } from '../lib/config'
-import { readImageSize, resizeImage } from '../lib/image'
+import { maxSideFor, readImageSize, resizeImage, scaledSize } from '../lib/image'
 import { loadName, saveName } from '../lib/storage'
 
-const PIECE_PRESETS = [
-  { count: 24, label: '쉬움' },
-  { count: 48, label: '보통' },
-  { count: 80, label: '도전' },
-  { count: 140, label: '어려움' },
-  { count: 250, label: '지옥' },
-]
+/**
+ * 슬라이더가 고를 수 있는 조각 수. 애매한 숫자가 나오지 않도록 정해 둔 값만 쓴다.
+ * 10 ~ 100은 10개 단위, 150 ~ 1000은 50개 단위.
+ */
+const PIECE_STOPS: number[] = [
+  ...Array.from({ length: 10 }, (_, i) => (i + 1) * 10),
+  ...Array.from({ length: 18 }, (_, i) => 150 + i * 50),
+].filter((n) => n <= MAX_PIECES)
+
+const DEFAULT_COUNT = 80
+/** 조각 한 변이 이보다 작으면 조작하기 힘들다. */
+const MIN_COMFORTABLE_PIECE_PX = 30
+
+function difficultyLabel(count: number): string {
+  if (count <= 30) return '쉬움'
+  if (count <= 60) return '보통'
+  if (count <= 100) return '도전'
+  if (count <= 250) return '어려움'
+  if (count <= 500) return '지옥'
+  return '극악'
+}
 
 interface Picked {
   url: string
@@ -26,7 +40,8 @@ export default function Create() {
   const navigate = useNavigate()
   const [name, setName] = useState(loadName)
   const [picked, setPicked] = useState<Picked | null>(null)
-  const [count, setCount] = useState(80)
+  const [stop, setStop] = useState(() => Math.max(0, PIECE_STOPS.indexOf(DEFAULT_COUNT)))
+  const count = PIECE_STOPS[stop]
   const [dragOver, setDragOver] = useState(false)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
@@ -39,10 +54,13 @@ export default function Create() {
     }
   }, [picked])
 
-  const grid = useMemo(
-    () => (picked ? computeGrid(count, picked.width, picked.height) : null),
-    [picked, count],
-  )
+  // 사진 비율에 맞춰 실제로 나뉘는 칸 수, 그리고 조각 하나의 대략적인 크기(px)
+  const plan = useMemo(() => {
+    if (!picked) return null
+    const { width, height } = scaledSize(picked.width, picked.height, maxSideFor(count))
+    const { cols, rows } = computeGrid(count, width, height)
+    return { cols, rows, total: cols * rows, piecePx: Math.round(Math.min(width / cols, height / rows)) }
+  }, [picked, count])
 
   async function pickFile(file: File | undefined) {
     if (!file) return
@@ -78,7 +96,7 @@ export default function Create() {
     setBusy(true)
     setError('')
     try {
-      const { blob, width, height } = await resizeImage(picked.file)
+      const { blob, width, height } = await resizeImage(picked.file, maxSideFor(count))
       const { cols, rows } = computeGrid(count, width, height)
       const res = await fetch(apiUrl(`/api/rooms?cols=${cols}&rows=${rows}&w=${width}&h=${height}`), {
         method: 'POST',
@@ -164,24 +182,41 @@ export default function Create() {
         </div>
 
         <div className="field">
-          <span>난이도</span>
-          <div className="segmented">
-            {PIECE_PRESETS.map((p) => (
-              <button
-                key={p.count}
-                type="button"
-                className={count === p.count ? 'active' : ''}
-                onClick={() => setCount(p.count)}
-              >
-                {p.label}
-              </button>
-            ))}
+          <span>난이도 (조각 수)</span>
+          <div className="count-readout">
+            <strong>약 {count.toLocaleString()}조각</strong>
+            <em>{difficultyLabel(count)}</em>
+          </div>
+          <input
+            type="range"
+            className="slider"
+            min={0}
+            max={PIECE_STOPS.length - 1}
+            step={1}
+            value={stop}
+            onChange={(e) => setStop(Number(e.target.value))}
+            style={{ '--fill': `${(stop / (PIECE_STOPS.length - 1)) * 100}%` } as CSSProperties}
+            aria-label="조각 수"
+            aria-valuetext={`약 ${count}조각, ${difficultyLabel(count)}`}
+          />
+          <div className="slider-ends" aria-hidden>
+            <span>{PIECE_STOPS[0]}</span>
+            <span>{PIECE_STOPS[PIECE_STOPS.length - 1].toLocaleString()}</span>
           </div>
           <small className="muted">
-            {grid
-              ? `${grid.cols} × ${grid.rows} = ${grid.cols * grid.rows}조각`
-              : '사진을 고르면 조각 수가 계산돼요.'}
+            {plan
+              ? `사진 비율에 맞춰 ${plan.cols} × ${plan.rows} = ${plan.total.toLocaleString()}조각으로 나눠요.`
+              : '사진을 고르면 실제 조각 수가 계산돼요.'}
           </small>
+          {plan && plan.piecePx < MIN_COMFORTABLE_PIECE_PX && (
+            <small className="warn-text">
+              사진 해상도에 비해 조각이 너무 많아서 한 조각이 약 {plan.piecePx}px로 아주 작아요. 더 큰 사진을 쓰거나
+              조각 수를 줄이는 걸 추천해요.
+            </small>
+          )}
+          {count >= 500 && (
+            <small className="muted">조각이 많아서 처음 불러올 때 시간이 걸리고, 사양이 낮은 기기에서는 느릴 수 있어요.</small>
+          )}
         </div>
 
         {error && <p className="error-text">{error}</p>}

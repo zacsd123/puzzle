@@ -331,25 +331,96 @@ input:focus {
   font-size: 15px;
 }
 
-.segmented {
-  display: grid;
-  grid-template-columns: repeat(5, 1fr);
-  gap: 6px;
+/* 난이도 슬라이더 */
+.count-readout {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
 }
 
-.segmented button {
-  padding: 9px 4px;
-  font-size: 13px;
-  font-weight: 600;
-  background: var(--bg-soft);
-  border: 1px solid var(--border);
-  border-radius: 9px;
+.count-readout strong {
+  font-size: 24px;
+  font-variant-numeric: tabular-nums;
+}
+
+.count-readout em {
+  padding: 2px 9px;
+  font-style: normal;
+  font-size: 12px;
+  font-weight: 700;
+  color: #c5ccff;
+  background: rgba(124, 140, 255, 0.16);
+  border-radius: 999px;
+}
+
+.slider {
+  --fill: 0%;
+  width: 100%;
+  height: 28px;
+  margin: 0;
+  background: transparent;
   cursor: pointer;
+  appearance: none;
+  -webkit-appearance: none;
 }
 
-.segmented button.active {
-  background: var(--accent-strong);
-  border-color: transparent;
+.slider:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 4px;
+  border-radius: 8px;
+}
+
+.slider::-webkit-slider-runnable-track {
+  height: 8px;
+  border-radius: 999px;
+  background: linear-gradient(90deg, var(--accent) var(--fill), rgba(255, 255, 255, 0.12) var(--fill));
+}
+
+.slider::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  width: 22px;
+  height: 22px;
+  margin-top: -7px;
+  background: #fff;
+  border: 3px solid var(--accent-strong);
+  border-radius: 50%;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.45);
+}
+
+.slider::-moz-range-track {
+  height: 8px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.12);
+}
+
+.slider::-moz-range-progress {
+  height: 8px;
+  border-radius: 999px;
+  background: var(--accent);
+}
+
+.slider::-moz-range-thumb {
+  width: 16px;
+  height: 16px;
+  background: #fff;
+  border: 3px solid var(--accent-strong);
+  border-radius: 50%;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.45);
+}
+
+.slider-ends {
+  display: flex;
+  justify-content: space-between;
+  margin-top: -4px;
+  font-size: 12px;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.warn-text {
+  color: #fbbf24;
+  font-size: 13px;
+  line-height: 1.45;
 }
 
 .room-code-inline {

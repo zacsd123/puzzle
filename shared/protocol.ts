@@ -6,8 +6,8 @@
 export const MAX_NAME_LENGTH = 16
 export const MAX_IMAGE_BYTES = 8 * 1024 * 1024
 export const MIN_GRID = 2
-export const MAX_GRID = 25
-export const MAX_PIECES = 400
+export const MAX_GRID = 60 // 가로로 아주 긴 사진도 1000조각까지 나눌 수 있도록 넉넉하게
+export const MAX_PIECES = 1000
 export const ROOM_CODE_LENGTH = 5
 export const ROOM_CODE_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'
 
@@ -131,9 +131,33 @@ export function snapThreshold(pw: number, ph: number) {
   return Math.max(12, Math.min(pw, ph) * SNAP_RATIO)
 }
 
-/** 목표 조각 수와 이미지 비율로, 조각이 최대한 정사각형에 가깝게 되는 행/열 수를 구한다. */
+/** 조각의 가로:세로 비율이 이 범위(1/1.25 ~ 1.25)를 벗어나면 너무 납작/길쭉하다고 본다. */
+const MAX_PIECE_SKEW = Math.log(1.25)
+
+/**
+ * 목표 조각 수와 이미지 비율로 열/행 수를 구한다.
+ * 조각이 너무 길쭉해지지 않는 범위에서 목표 개수에 가장 가까운 분할을 고르므로,
+ * 슬라이더에서 80개를 골랐다면 대부분 정확히 80개로 나뉜다. (사진 비율에 따라 몇 개 차이 날 수 있음)
+ */
 export function computeGrid(targetPieces: number, imgW: number, imgH: number) {
-  const target = Math.max(MIN_GRID * MIN_GRID, Math.min(MAX_PIECES, targetPieces))
+  const target = Math.max(MIN_GRID * MIN_GRID, Math.min(MAX_PIECES, Math.round(targetPieces)))
+
+  let best: { cols: number; rows: number; miss: number; skew: number } | null = null
+  for (let cols = MIN_GRID; cols <= MAX_GRID; cols++) {
+    const base = Math.floor(target / cols)
+    for (const rows of [base, base + 1]) {
+      if (rows < MIN_GRID || rows > MAX_GRID || cols * rows > MAX_PIECES) continue
+      const skew = Math.abs(Math.log(imgW / cols / (imgH / rows)))
+      if (skew > MAX_PIECE_SKEW) continue
+      const miss = Math.abs(cols * rows - target)
+      if (!best || miss < best.miss || (miss === best.miss && skew < best.skew)) {
+        best = { cols, rows, miss, skew }
+      }
+    }
+  }
+  if (best) return { cols: best.cols, rows: best.rows }
+
+  // 아주 길쭉한 사진 등으로 조건에 맞는 분할이 없으면, 조각이 가장 정사각형에 가까운 분할을 쓴다.
   let cols = Math.round(Math.sqrt((target * imgW) / imgH))
   cols = Math.max(MIN_GRID, Math.min(MAX_GRID, cols))
   let rows = Math.round(target / cols)
