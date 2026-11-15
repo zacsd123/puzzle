@@ -1,18 +1,47 @@
 import { chatOpacity } from './chat'
-import type { GameClient } from './GameClient'
+import type { ClientPiece, GameClient } from './GameClient'
 import { SIDES } from './jigsaw'
 
 /** 조각이 붙을 때 반짝이는 시간(ms) */
 const FLASH_MS = 550
 
 // ---- 조각이 많을 때의 렌더링 비용 조절 ----
-// (측정: 1000조각을 절반 이하로 줄여 그리면 고화질 보간은 프레임당 300ms+, 낮은 화질 보간은 20ms 안팎)
-/** 이 수보다 조각이 많고 많이 축소해서 보는 중이면 가벼운 보간으로 그린다. */
-const HEAVY_PIECE_COUNT = 150
-/** 실제 화면 배율(줌 × 화면 배율)이 이보다 작으면 브라우저가 느린 축소 보간 경로를 탄다. */
-const DOWNSCALE_SLOW_BELOW = 0.5
+// (측정: 조각을 줄여서 그릴 때 고화질 보간은 조각이 많을수록 급격히 느려진다.
+//  300조각을 실제 배율 0.5~0.7로 보면 고화질 33~39ms/프레임, 낮은 화질 7ms. 1000조각은 0.9 근처까지 차이가 난다.)
+/** 이 수보다 조각이 많고 줄여서 보는 중이면 가벼운 보간으로 그린다. */
+const HEAVY_PIECE_COUNT = 100
+/** 실제 화면 배율(줌 × 화면 배율)이 이보다 작으면(= 조각 그림을 줄여서 그리면) 브라우저가 느린 축소 보간 경로를 탄다. */
+const DOWNSCALE_SLOW_BELOW = 1.0
 /** 들고 있는 덩어리의 그림자는 조각마다 흐림 효과를 따로 계산해서, 큰 덩어리는 그림자를 생략한다. */
 const SHADOW_MAX_PIECES = 60
+/**
+ * 캔버스를 실제 화면 픽셀(devicePixelRatio)만큼 촘촘하게 만들되 상한을 둔다. 휴대폰처럼 배율이 3인 화면은 픽셀 수가 많아서,
+ * 조각이 많을 때는 2로 낮춘다. (측정: 같은 장면이 300조각에서 배율 3은 2보다 약 2배, 1000조각 확대 화면은 2배 이상 느림)
+ */
+const MAX_DPR = 3
+const MAX_DPR_HEAVY = 2
+/**
+ * 판에 맞춰진(고정된) 조각은 다시 움직이지 않으므로 한 장의 그림(레이어)에 미리 모아 두고, 많이 줄여서 볼 때는 그 한 장만 그린다.
+ * 조각 1000개를 개별로 그리면 프레임당 10~17ms, 한 장으로 그리면 2~3ms. 확대해서 볼 때는 화면에 보이는 조각만 직접 그려서 선명함을 지킨다.
+ * 실제 화면 배율(줌 × 화면 배율)이 이 값보다 작을 때만 레이어를 쓴다.
+ */
+const LAYER_BELOW_SCALE = 1.5
+/**
+ * 화면에 아무 변화가 없으면 다시 그리지 않는다. (조각 1000개 전체 보기는 한 프레임에 약 17ms라서, 정지 화면에서도 GPU가 쉬지 못했다.)
+ * 변화를 놓치더라도 화면이 오래 굳어 있지 않도록, 변화가 없어도 이 시간마다 한 번은 그린다.
+ */
+const IDLE_REDRAW_MS = 1000
+/** 다른 사람 커서가 이 시간 동안 안 움직이면 흐리게 그린다. */
+const CURSOR_IDLE_MS = 6000
+
+/** 고정된 조각을 월드 좌표 그대로(배율 1) 모아 둔 그림. 왼쪽 위가 월드 (-pad, -pad). */
+interface LockedLayer {
+  canvas: HTMLCanvasElement
+  ctx: CanvasRenderingContext2D
+  /** 조각 번호별로 이미 그려 넣었는지 */
+  baked: Uint8Array
+  count: number
+}
 
 interface Camera {
   scale: number
@@ -46,9 +75,18 @@ export class BoardView {
   private drag: Drag | null = null
   /** 마지막으로 그린 퍼즐의 이미지/조각 그림. 바뀌면 새 퍼즐이 시작된 것이다. */
   private lastAssets: object | null = null
+  private lockedLayer: LockedLayer | null = null
   private raf = 0
   private lastTime = 0
   private ro: ResizeObserver
+  // ---- 다시 그릴지 판단하는 값들 ----
+  /** 카메라/크기/힌트 같은, 렌더러 안에서 바뀐 것이 있어서 다시 그려야 하는지 */
+  private dirty = true
+  /** 마지막으로 그렸을 때의 client.revision */
+  private seenRevision = -1
+  private lastDrawAt = 0
+  /** 다른 사람 커서를 마지막으로 흐리게/또렷하게 그렸던 상태 (시간이 지나 상태가 바뀌면 다시 그린다) */
+  private cursorIdleDrawn = new Map<string, boolean>()
   /** 마지막으로 그린 자유 조각들 (z 오름차순). 히트 테스트에서 위에 있는 조각부터 검사하는 데 쓴다. */
   private drawOrder: number[] = []
 
@@ -69,13 +107,20 @@ export class BoardView {
 
     this.ro = new ResizeObserver(() => this.resize())
     this.ro.observe(canvas)
+    document.addEventListener('visibilitychange', this.invalidate)
     this.resize()
     this.raf = requestAnimationFrame(this.frame)
+  }
+
+  /** 다음 프레임에 반드시 다시 그리게 한다. */
+  invalidate = () => {
+    this.dirty = true
   }
 
   destroy() {
     cancelAnimationFrame(this.raf)
     this.ro.disconnect()
+    document.removeEventListener('visibilitychange', this.invalidate)
     const c = this.canvas
     c.removeEventListener('pointerdown', this.onPointerDown)
     c.removeEventListener('pointermove', this.onPointerMove)
@@ -89,6 +134,7 @@ export class BoardView {
   // ---------- 공개 API (HUD 버튼용) ----------
   setGhost(on: boolean) {
     this.showGhost = on
+    this.dirty = true
   }
 
   /** 테이블 전체가 한눈에 보이도록 맞춘다. */
@@ -106,6 +152,7 @@ export class BoardView {
     this.cam.oy = (this.height - bh * scale) / 2 - bounds.minY * scale
     this.fitted = true
     this.userMoved = false
+    this.dirty = true
   }
 
   zoomBy(factor: number) {
@@ -117,7 +164,8 @@ export class BoardView {
   private resize() {
     const w = this.canvas.clientWidth
     const h = this.canvas.clientHeight
-    this.dpr = window.devicePixelRatio || 1
+    const maxDpr = this.client.pieces.length > HEAVY_PIECE_COUNT ? MAX_DPR_HEAVY : MAX_DPR
+    this.dpr = Math.min(window.devicePixelRatio || 1, maxDpr)
     const hadSize = this.width > 0
     const prevW = this.width
     const prevH = this.height
@@ -125,6 +173,7 @@ export class BoardView {
     this.height = h
     this.canvas.width = Math.max(1, Math.round(w * this.dpr))
     this.canvas.height = Math.max(1, Math.round(h * this.dpr))
+    this.dirty = true // 캔버스 크기를 바꾸면 그림이 지워진다.
     if (!this.fitted || !hadSize) return
     if (this.userMoved) {
       // 직접 보던 화면은 중심을 유지한다.
@@ -151,6 +200,7 @@ export class BoardView {
     this.cam.scale = scale
     this.cam.ox = sx - wx * scale
     this.cam.oy = sy - wy * scale
+    this.dirty = true
   }
 
   // ---------- 입력 ----------
@@ -210,6 +260,7 @@ export class BoardView {
       this.cam.oy += sy - drag.lastY
       drag.lastX = sx
       drag.lastY = sy
+      this.dirty = true
     } else {
       this.canvas.style.cursor = this.hitTest(x, y) !== null ? 'grab' : 'default'
     }
@@ -223,6 +274,43 @@ export class BoardView {
     if (drag?.kind === 'piece' && this.client.myHeld === drag.id) {
       this.client.endDrag(drag.id)
     }
+  }
+
+  /**
+   * 고정된 조각 중 제자리에 도착한 것을 레이어에 그려 넣는다. (아직 제자리로 움직이는 중인 조각은 다음 프레임에)
+   * 고정된 조각은 다시 풀리지 않으니 한 번 넣으면 끝이다. 만약 풀린 조각이 보이면 레이어를 처음부터 다시 만든다.
+   */
+  private syncLockedLayer(
+    pieces: ClientPiece[],
+    bitmaps: HTMLCanvasElement[],
+    W: number,
+    H: number,
+    pad: number,
+  ): LockedLayer | null {
+    let layer = this.lockedLayer
+    let stale = false
+    for (const p of pieces) {
+      if (!p.locked) {
+        if (layer && layer.baked[p.id]) stale = true
+        continue
+      }
+      if (layer && layer.baked[p.id]) continue
+      if (p.x !== p.tx || p.y !== p.ty) continue
+      if (!layer) {
+        const canvas = document.createElement('canvas')
+        canvas.width = Math.ceil(W + pad * 2)
+        canvas.height = Math.ceil(H + pad * 2)
+        layer = this.lockedLayer = { canvas, ctx: canvas.getContext('2d')!, baked: new Uint8Array(pieces.length), count: 0 }
+      }
+      layer.ctx.drawImage(bitmaps[p.id], p.x, p.y) // 레이어의 (0,0)이 월드 (-pad,-pad)이므로 조각 그림은 (x, y)에 놓인다.
+      layer.baked[p.id] = 1
+      layer.count++
+    }
+    if (stale && layer) {
+      this.lockedLayer = null // 일어나지 않을 일이지만, 풀린 조각이 있으면 처음부터 다시 만든다.
+      return this.syncLockedLayer(pieces, bitmaps, W, H, pad)
+    }
+    return layer
   }
 
   /** 월드 좌표 (wx, wy) 위에 있는, 내가 집을 수 있는 가장 위쪽 조각 */
@@ -247,25 +335,49 @@ export class BoardView {
     this.raf = requestAnimationFrame(this.frame)
     const dt = Math.min(0.1, (t - this.lastTime) / 1000)
     this.lastTime = t
-    this.client.step(dt)
-    this.draw()
+    const moving = this.client.step(dt) // 상태 갱신은 매 프레임 하지만(싸다), 그리기는 바뀐 게 있을 때만 한다.
+    if (this.needsRedraw(performance.now(), moving)) this.draw()
+  }
+
+  /** 마지막으로 그린 뒤로 화면에 보이는 무언가가 바뀌었는지 */
+  private needsRedraw(now: number, moving: boolean): boolean {
+    if (moving || this.dirty) return true
+    if (this.client.revision !== this.seenRevision) return true // 서버 소식, 내가 잡거나 옮긴 조각, 접속 상태 …
+    if (this.client.effects.length > 0) return true // 붙을 때 반짝이는 효과
+    if (now - this.lastDrawAt >= IDLE_REDRAW_MS) return true // 안전장치
+    // 시간이 지나서 저절로 바뀌는 것: 말풍선이 흐려지는 중이거나, 커서가 한동안 안 움직여서 흐려질 때
+    for (const pl of this.client.players.values()) {
+      if (pl.info.id === this.client.meId || !pl.hasCursor) continue
+      if (pl.chat) return true
+      const idleNow = now - pl.lastSeen > CURSOR_IDLE_MS
+      if (idleNow !== (this.cursorIdleDrawn.get(pl.info.id) ?? false)) return true
+    }
+    return false
   }
 
   private draw() {
+    this.dirty = false
+    this.seenRevision = this.client.revision
+    this.lastDrawAt = performance.now()
+
+    // 새 퍼즐(사진/격자가 다름)이 시작되면 처음 들어왔을 때처럼 전체가 한눈에 보이게 다시 맞춘다.
+    // 캔버스 크기를 바꾸면 그리기 상태가 초기화되므로 이 프레임의 그리기를 시작하기 전에 한다.
+    const assets = this.client.assets
+    if (assets && assets !== this.lastAssets) {
+      this.lastAssets = assets
+      this.resize() // 조각 수가 정해졌으니 캔버스 해상도 상한도 다시 정한다.
+      this.fitted = false
+      this.drag = null
+      this.lockedLayer = null // 이전 퍼즐의 고정 조각 그림은 버린다.
+    }
+
     const { ctx, dpr } = this
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
     ctx.fillStyle = '#0d1018'
     ctx.fillRect(0, 0, this.width, this.height)
 
     const puzzle = this.client.puzzle
-    const assets = this.client.assets
     if (!puzzle || !assets || this.width === 0) return
-    // 새 퍼즐(사진/격자가 다름)이 시작되면 처음 들어왔을 때처럼 전체가 한눈에 보이게 다시 맞춘다.
-    if (assets !== this.lastAssets) {
-      this.lastAssets = assets
-      this.fitted = false
-      this.drag = null
-    }
     if (!this.fitted) this.fit()
 
     const { scale, ox, oy } = this.cam
@@ -309,12 +421,37 @@ export class BoardView {
     ctx.strokeRect(0, 0, W, H)
 
     // 조각 그리기용 보간 화질. 판 배경/원본 힌트는 위에서 고화질로 이미 그렸다.
-    ctx.imageSmoothingQuality =
+    const pieceQuality: ImageSmoothingQuality =
       pieces.length > HEAVY_PIECE_COUNT && dpr * scale < DOWNSCALE_SLOW_BELOW ? 'low' : 'high'
 
-    // 맞춰진 조각 (맨 아래)
+    // 화면 밖 조각은 그리지 않는다. (조각 그림의 여백과 그림자/테두리가 번지는 만큼 여유를 둔다)
+    const reach = geo.pad + 24 / scale
+    const viewL = -ox / scale - geo.pw - reach
+    const viewR = (this.width - ox) / scale + reach
+    const viewT = -oy / scale - geo.ph - reach
+    const viewB = (this.height - oy) / scale + reach
+    const onScreen = (p: ClientPiece) => p.x > viewL && p.x < viewR && p.y > viewT && p.y < viewB
+
+    // 맞춰진 조각 (맨 아래). 많이 줄여서 보는 중이면 미리 모아 둔 레이어 한 장으로 그린다.
+    const layer = this.syncLockedLayer(pieces, bitmaps, W, H, geo.pad)
+    const useLayer = layer !== null && layer.count > 0 && dpr * scale < LAYER_BELOW_SCALE
+    if (useLayer) {
+      const pad = geo.pad
+      const sx = Math.max(0, Math.floor(-ox / scale + pad))
+      const sy = Math.max(0, Math.floor(-oy / scale + pad))
+      const sw = Math.min(layer.canvas.width, Math.ceil((this.width - ox) / scale + pad)) - sx
+      const sh = Math.min(layer.canvas.height, Math.ceil((this.height - oy) / scale + pad)) - sy
+      if (sw > 0 && sh > 0) {
+        // 낮은 화질로 그린다. 조각 개별로 그릴 때(낮은 화질)와 눈에 띄는 차이가 없고, 높은 화질은 다른 조각과 섞어 그릴 때 훨씬 느렸다.
+        ctx.imageSmoothingQuality = 'low'
+        ctx.drawImage(layer.canvas, sx, sy, sw, sh, sx - pad, sy - pad, sw, sh)
+      }
+    }
+    ctx.imageSmoothingQuality = pieceQuality
     for (const p of pieces) {
-      if (p.locked) ctx.drawImage(bitmaps[p.id], p.x - geo.pad, p.y - geo.pad)
+      if (!p.locked || !onScreen(p)) continue
+      if (useLayer && layer.baked[p.id]) continue // 이미 레이어에 들어 있다.
+      ctx.drawImage(bitmaps[p.id], p.x - geo.pad, p.y - geo.pad)
     }
 
     // 떠 있는 조각 (z 순서). 이어 붙은 조각은 z가 같아서 한 덩어리로 연달아 그려진다.
@@ -335,10 +472,10 @@ export class BoardView {
         ctx.shadowColor = 'rgba(0,0,0,0.55)'
         ctx.shadowBlur = 16 * dpr
         ctx.shadowOffsetY = 6 * dpr
-        for (const p of run) ctx.drawImage(bitmaps[p.id], p.x - geo.pad, p.y - geo.pad)
+        for (const p of run) if (onScreen(p)) ctx.drawImage(bitmaps[p.id], p.x - geo.pad, p.y - geo.pad)
         ctx.restore()
       }
-      for (const p of run) ctx.drawImage(bitmaps[p.id], p.x - geo.pad, p.y - geo.pad)
+      for (const p of run) if (onScreen(p)) ctx.drawImage(bitmaps[p.id], p.x - geo.pad, p.y - geo.pad)
 
       if (holder) {
         // 누가 들고 있는지 덩어리의 "바깥 테두리"만 색으로 표시
@@ -348,6 +485,7 @@ export class BoardView {
         ctx.lineCap = 'round'
         ctx.strokeStyle = holder.info.color
         for (const p of run) {
+          if (!onScreen(p)) continue
           const r = Math.floor(p.id / cols)
           const c = p.id % cols
           ctx.save()
@@ -388,7 +526,8 @@ export class BoardView {
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
     for (const pl of players.values()) {
       if (pl.info.id === this.client.meId || !pl.hasCursor) continue
-      const idle = now - pl.lastSeen > 6000
+      const idle = now - pl.lastSeen > CURSOR_IDLE_MS
+      this.cursorIdleDrawn.set(pl.info.id, idle)
 
       // 커서 옆 채팅은 마지막으로 글이 바뀐 뒤 시간이 지나면 흐려지다가 사라진다.
       let chat: { text: string; alpha: number } | null = null

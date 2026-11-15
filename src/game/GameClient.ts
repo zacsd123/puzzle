@@ -70,6 +70,11 @@ export class GameClient {
   myHeld: number | null = null
   /** 최근에 붙은 조각들 (렌더러가 읽고 오래된 것은 지운다) */
   effects: SnapEffect[] = []
+  /**
+   * 화면에 보이는 상태(조각, 참가자, 커서, 연결 상태 등)가 바뀔 때마다 늘어나는 번호.
+   * 렌더러는 이 번호가 그대로면 다시 그리지 않는다.
+   */
+  revision = 0
 
   private ws: WebSocket | null = null
   private listeners = new Set<() => void>()
@@ -119,6 +124,7 @@ export class GameClient {
   getSnapshot = () => this.snapshot
 
   private publish() {
+    this.revision++
     this.snapshot = {
       status: this.status,
       error: this.error,
@@ -254,6 +260,7 @@ export class GameClient {
 
   // ---------- 서버 메시지 처리 ----------
   private handle(msg: ServerMessage) {
+    this.revision++ // 서버가 보낸 모든 소식은 화면에 영향을 줄 수 있다. (조각, 커서, 채팅, 참가자 …)
     switch (msg.t) {
       case 'welcome': {
         // 입장할 때뿐 아니라, 방장이 새 퍼즐을 시작했을 때도 모두에게 온다. (그때는 사진/격자가 통째로 바뀐다)
@@ -430,6 +437,7 @@ export class GameClient {
       m.z = z
     }
     this.myHeld = id
+    this.revision++
     this.send({ t: 'grab', piece: id })
     return true
   }
@@ -440,6 +448,7 @@ export class GameClient {
     if (!piece) return
     const pos = this.clampGroupPos(piece, x, y)
     this.moveGroup(piece, pos.x, pos.y, true)
+    this.revision++
     this.pendingMove = { piece: id, x: pos.x, y: pos.y }
     this.schedule()
   }
@@ -451,6 +460,7 @@ export class GameClient {
     this.flush()
     this.send({ t: 'drop', piece: id, x: piece.tx, y: piece.ty })
     this.myHeld = null
+    this.revision++
   }
 
   private schedule() {
@@ -476,15 +486,18 @@ export class GameClient {
   }
 
   // ---------- 프레임마다 호출: 다른 사람의 조각/커서를 부드럽게 따라가게 한다 ----------
-  step(dtSec: number) {
+  /** 이번에 움직인(또는 제자리에 막 도착한) 조각/커서가 있으면 true. 렌더러는 아무것도 안 움직였으면 다시 그리지 않아도 된다. */
+  step(dtSec: number): boolean {
     const kPiece = 1 - Math.exp(-dtSec * 18)
     const kCursor = 1 - Math.exp(-dtSec * 28)
     const dragging = this.myHeld !== null
+    let moved = false
     for (const p of this.pieces) {
       // 내가 끌고 있는 덩어리는 마우스를 그대로 따라가야 한다.
       if (dragging && p.heldBy === this.meId) continue
       const dx = p.tx - p.x
       const dy = p.ty - p.y
+      if (dx === 0 && dy === 0) continue
       if (Math.abs(dx) < 0.05 && Math.abs(dy) < 0.05) {
         p.x = p.tx
         p.y = p.ty
@@ -492,10 +505,22 @@ export class GameClient {
         p.x += dx * kPiece
         p.y += dy * kPiece
       }
+      moved = true
     }
     for (const pl of this.players.values()) {
-      pl.x += (pl.tx - pl.x) * kCursor
-      pl.y += (pl.ty - pl.y) * kCursor
+      const dx = pl.tx - pl.x
+      const dy = pl.ty - pl.y
+      if (dx === 0 && dy === 0) continue
+      // 거의 다 따라왔으면 딱 맞춘다. (끝없이 조금씩 다가가며 계속 다시 그리게 되지 않도록)
+      if (Math.abs(dx) < 0.05 && Math.abs(dy) < 0.05) {
+        pl.x = pl.tx
+        pl.y = pl.ty
+      } else {
+        pl.x += dx * kCursor
+        pl.y += dy * kCursor
+      }
+      moved = true
     }
+    return moved
   }
 }
