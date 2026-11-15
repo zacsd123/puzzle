@@ -10,4 +10,4 @@ services:
       - key: NODE_ENV
         value: production
       - key: ALLOWED_ORIGIN
-        value: "https://puzzle-alpha-peach.vercel.app/" # Vercel 프론트 주소 생기면 https://your-app.vercel.app 로 바꾸기
+        value: "https://puzzle-alpha-peach.vercel.app" # 끝에 슬래시(/) 붙이면 안 됨 — Origin 헤더엔 슬래시 없음

@@ -86,7 +86,7 @@ function intParam(url: URL, key: string): number {
 }
 
 function setCors(req: IncomingMessage, res: ServerResponse) {
-  const allowed = ALLOWED_ORIGIN.split(',').map((s) => s.trim())
+  const allowed = ALLOWED_ORIGIN.split(',').map((s) => s.trim().replace(/\/+$/, ''))
   const origin = req.headers.origin
   res.setHeader('Access-Control-Allow-Origin', ALLOWED_ORIGIN === '*' ? '*' : origin && allowed.includes(origin) ? origin : allowed[0])
   res.setHeader('Vary', 'Origin')
