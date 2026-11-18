@@ -31,6 +31,9 @@ const LAYER_BELOW_SCALE = 1.5
  * 변화를 놓치더라도 화면이 오래 굳어 있지 않도록, 변화가 없어도 이 시간마다 한 번은 그린다.
  */
 const IDLE_REDRAW_MS = 1000
+/** "C"로 찾은 조각이 반짝이는 시간(ms) */
+const LOCATE_MS = 2400
+
 /** 다른 사람 커서가 이 시간 동안 안 움직이면 흐리게 그린다. */
 const CURSOR_IDLE_MS = 6000
 
@@ -122,6 +125,10 @@ export class BoardView {
   private dragPointer: { x: number; y: number; type: string } | null = null
   /** 내 커서 위치를 서버에 한 번이라도 보냈는지 (터치 기기는 끌기 전까지 커서가 없다) */
   private cursorSent = false
+  /** 마우스가 마지막으로 있던 화면 좌표. 캔버스 밖으로 나가면 null */
+  private hover: { x: number; y: number } | null = null
+  /** "C"로 찾은 조각 (나한테만 보인다) */
+  private locating: { id: number; at: number } | null = null
 
   constructor(
     private canvas: HTMLCanvasElement,
@@ -136,6 +143,7 @@ export class BoardView {
     canvas.addEventListener('pointercancel', this.onPointerUp)
     canvas.addEventListener('wheel', this.onWheel, { passive: false })
     canvas.addEventListener('contextmenu', this.preventDefault)
+    canvas.addEventListener('pointerleave', this.onPointerLeave)
     canvas.addEventListener('mousedown', this.onMouseDown)
 
     this.ro = new ResizeObserver(() => this.resize())
@@ -177,6 +185,7 @@ export class BoardView {
     c.removeEventListener('pointercancel', this.onPointerUp)
     c.removeEventListener('wheel', this.onWheel)
     c.removeEventListener('contextmenu', this.preventDefault)
+    c.removeEventListener('pointerleave', this.onPointerLeave)
     c.removeEventListener('mousedown', this.onMouseDown)
   }
 
@@ -368,6 +377,7 @@ export class BoardView {
     if (!puzzle || !this.client.assets) return
     if (this.ignored.has(e.pointerId)) return
     const { sx, sy } = this.toScreen(e)
+    this.hover = { x: sx, y: sy }
     const tracked = this.pointers.get(e.pointerId)
     if (tracked) {
       tracked.x = sx
@@ -405,6 +415,26 @@ export class BoardView {
     } else if (e.pointerType === 'mouse') {
       this.canvas.style.cursor = this.hitTest(x, y) !== null ? 'grab' : 'default'
     }
+  }
+
+  private onPointerLeave = () => {
+    this.hover = null
+  }
+
+  /**
+   * 마우스가 올라가 있는 퍼즐판 자리에 들어갈 조각이 지금 어디 있는지 반짝여서 알려 준다. (나한테만 보인다)
+   * 퍼즐판 밖이거나 마우스가 없으면 false.
+   */
+  locateAtPointer(): boolean {
+    const puzzle = this.client.puzzle
+    if (!puzzle || !this.hover || this.client.pieces.length === 0) return false
+    const { x, y } = this.toWorld(this.hover.x, this.hover.y)
+    const { cols, rows, imageWidth: W, imageHeight: H } = puzzle
+    if (x < 0 || y < 0 || x >= W || y >= H) return false
+    const id = Math.floor(y / (H / rows)) * cols + Math.floor(x / (W / cols))
+    this.locating = { id, at: performance.now() }
+    this.dirty = true
+    return true
   }
 
   private onPointerUp = (e: PointerEvent) => {
@@ -564,6 +594,7 @@ export class BoardView {
     if (moving || this.dirty) return true
     if (this.client.revision !== this.seenRevision) return true // 서버 소식, 내가 잡거나 옮긴 조각, 접속 상태 …
     if (this.client.effects.length > 0) return true // 붙을 때 반짝이는 효과
+    if (this.locating) return true // "C"로 찾은 조각이 반짝이는 중
     if (now - this.lastDrawAt >= IDLE_REDRAW_MS) return true // 안전장치
     // 시간이 지나서 저절로 바뀌는 것: 말풍선이 흐려지는 중이거나, 커서가 한동안 안 움직여서 흐려질 때
     for (const pl of this.client.players.values()) {
@@ -742,8 +773,61 @@ export class BoardView {
       ctx.restore()
     }
 
+    // "C"로 찾은 조각: 노랗게 깜빡인다. 화면 밖에 있으면 아래에서 방향 표시를 그린다.
+    let locateOff: { sx: number; sy: number; pulse: number } | null = null
+    if (this.locating) {
+      const age = now - this.locating.at
+      const piece = pieces[this.locating.id]
+      if (age >= LOCATE_MS || !piece) {
+        this.locating = null
+      } else {
+        const pulse = 0.5 + 0.5 * Math.sin((age / 1000) * Math.PI * 2 * 2.5 - Math.PI / 2) // 초당 2.5번 깜빡
+        const fade = Math.min(1, (LOCATE_MS - age) / 500)
+        ctx.save()
+        ctx.translate(piece.x, piece.y)
+        ctx.globalAlpha = (0.25 + 0.5 * pulse) * fade
+        ctx.fillStyle = '#fff3a8'
+        ctx.fill(geo.paths[piece.id])
+        ctx.globalAlpha = (0.55 + 0.45 * pulse) * fade
+        ctx.strokeStyle = '#ffd43b'
+        ctx.lineWidth = 4 / scale
+        ctx.lineJoin = 'round'
+        ctx.stroke(geo.paths[piece.id])
+        ctx.restore()
+        const sx = (piece.x + geo.pw / 2) * scale + ox
+        const sy = (piece.y + geo.ph / 2) * scale + oy
+        if (sx < 0 || sy < 0 || sx > this.width || sy > this.height) locateOff = { sx, sy, pulse: pulse * fade }
+      }
+    }
+
     // 다른 사람 커서 (화면 크기 기준으로 그린다)
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
+    if (locateOff) {
+      // 화면 가운데에서 조각 쪽으로 향하는 화살표를 화면 가장자리에 놓는다.
+      const cx = this.width / 2
+      const cy = this.height / 2
+      const dx = locateOff.sx - cx
+      const dy = locateOff.sy - cy
+      const m = 34
+      const k = Math.min((cx - m) / Math.abs(dx || 1e-6), (cy - m) / Math.abs(dy || 1e-6))
+      ctx.save()
+      ctx.translate(cx + dx * k, cy + dy * k)
+      ctx.rotate(Math.atan2(dy, dx))
+      ctx.globalAlpha = 0.6 + 0.4 * locateOff.pulse
+      ctx.fillStyle = '#ffd43b'
+      ctx.strokeStyle = 'rgba(0,0,0,0.55)'
+      ctx.lineWidth = 2
+      ctx.lineJoin = 'round'
+      ctx.beginPath()
+      ctx.moveTo(18, 0)
+      ctx.lineTo(-10, -14)
+      ctx.lineTo(-4, 0)
+      ctx.lineTo(-10, 14)
+      ctx.closePath()
+      ctx.fill()
+      ctx.stroke()
+      ctx.restore()
+    }
     for (const pl of players.values()) {
       if (pl.info.id === this.client.meId || !pl.hasCursor) continue
       const idle = now - pl.lastSeen > CURSOR_IDLE_MS

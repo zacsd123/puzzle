@@ -52,6 +52,20 @@ export default function GameScreen({ client, roomId }: { client: GameClient; roo
     viewRef.current?.setGhost(ghost)
   }, [ghost])
 
+  // "C": 마우스가 올라가 있는 퍼즐판 자리에 들어갈 조각이 어디 있는지 반짝여서 알려 준다. (한글 입력 상태의 ㅊ도 같은 키다)
+  useEffect(() => {
+    if (snap.status !== 'ready') return
+    const onKey = (e: KeyboardEvent) => {
+      if (e.defaultPrevented || e.repeat || e.ctrlKey || e.metaKey || e.altKey || e.isComposing) return
+      if (e.code !== 'KeyC') return
+      const t = e.target as HTMLElement | null
+      if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.tagName === 'SELECT' || t.isContentEditable)) return
+      if (viewRef.current?.locateAtPointer()) e.preventDefault()
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [snap.status])
+
   async function onInvite() {
     if (coarse && canShare) {
       try {
@@ -104,6 +118,7 @@ export default function GameScreen({ client, roomId }: { client: GameClient; roo
   const hint = [
     '맞는 조각끼리 가까이 두면 붙어요',
     coarse ? '두 손가락으로 확대·이동' : '빈 곳 드래그로 이동 · 휠로 확대/축소',
+    anyHover && !coarse ? '퍼즐판에 마우스를 올리고 C: 그 자리 조각 찾기' : null,
     anyHover && !coarse ? '/ 키로 채팅' : null,
   ]
     .filter(Boolean)
